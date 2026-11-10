@@ -1,0 +1,17 @@
+{
+  "games": {
+    "gta5": {
+      "title": "Grand Theft Auto V",
+      "spoiler_policy": "standard",
+      "block_tags": ["story_spoiler", "ending", "cutscene_only", "leak", "in_game_radio_music"],
+      "topic_sources": ["rockstar_newswire", "youtube_trending_gaming", "reddit_gta"]
+    },
+    "gta6": {
+      "title": "Grand Theft Auto VI",
+      "spoiler_policy": "maximum",
+      "block_tags": ["story_spoiler", "ending", "cutscene_only", "leak", "pre_release", "mission_reveal", "in_game_radio_music"],
+      "topic_sources": ["rockstar_newswire", "youtube_trending_gaming", "reddit_gta6"],
+      "launch_week_mode": true
+    }
+  }
+}

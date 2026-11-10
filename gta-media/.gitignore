@@ -1,0 +1,10 @@
+.env
+data/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+*.mp4
+*.mov
+*.mkv
+*.wav
+*.m4a
