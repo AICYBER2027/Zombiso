@@ -1,0 +1,96 @@
+# VicePulse stack for later use: n8n in queue mode (main + worker), Postgres, Redis and the
+# VicePulse pipeline worker. NOT deployed and not started by anything in this repo.
+#
+# Local trial:   cp .env.example .env   (fill in POSTGRES_PASSWORD, N8N_ENCRYPTION_KEY, VICEPULSE_WORKER_TOKEN)
+#                docker compose up -d --build
+#                docker compose run --rm vicepulse vicepulse migrate
+# n8n editor:    http://localhost:5678  (bound to localhost only)
+#
+# Image tags are pinned to major versions; check them before first use.
+
+x-n8n-env: &n8n-env
+  DB_TYPE: postgresdb
+  DB_POSTGRESDB_HOST: postgres
+  DB_POSTGRESDB_DATABASE: n8n
+  DB_POSTGRESDB_USER: vicepulse
+  DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+  EXECUTIONS_MODE: queue
+  QUEUE_BULL_REDIS_HOST: redis
+  QUEUE_HEALTH_CHECK_ACTIVE: "true"
+  N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?set N8N_ENCRYPTION_KEY in .env}
+  N8N_RUNNERS_ENABLED: "true"
+  OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS: "true"
+  GENERIC_TIMEZONE: UTC
+  N8N_DIAGNOSTICS_ENABLED: "false"
+  N8N_PERSONALIZATION_ENABLED: "false"
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vicepulse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: vicepulse
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/init-n8n-db.sql:/docker-entrypoint-initdb.d/10-n8n.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vicepulse -d vicepulse"]
+      interval: 10s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 5
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest   # pin to a tested version before real use
+    restart: unless-stopped
+    environment: *n8n-env
+    ports:
+      - "127.0.0.1:5678:5678"
+    volumes:
+      - n8ndata:/home/node/.n8n
+      - ./n8n/workflows:/workflows:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  n8n-worker:
+    image: docker.n8n.io/n8nio/n8n:latest
+    restart: unless-stopped
+    command: worker
+    environment: *n8n-env
+    depends_on: [n8n]
+    # Scale for launch month:  docker compose up -d --scale n8n-worker=3
+
+  vicepulse:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://vicepulse:${POSTGRES_PASSWORD}@postgres:5432/vicepulse
+      VICEPULSE_DATA_DIR: /data
+    volumes:
+      - mediadata:/data
+    networks:
+      default:
+        aliases: [worker]          # n8n workflows call http://worker:8088/run
+    depends_on:
+      postgres: {condition: service_healthy}
+    # No "ports:" on purpose: the worker is reachable only inside this network.
+
+volumes:
+  pgdata:
+  redisdata:
+  n8ndata:
+  mediadata:

@@ -1,0 +1,19 @@
+# VicePulse worker: Python pipeline + FFmpeg, serving the CLI to n8n over the private docker network.
+FROM python:3.12-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY pyproject.toml ./
+COPY src ./src
+COPY db ./db
+COPY config ./config
+RUN pip install --no-cache-dir .
+
+RUN useradd --create-home vicepulse && mkdir -p /data && chown vicepulse /data
+USER vicepulse
+ENV VICEPULSE_DATA_DIR=/data
+EXPOSE 8088
+CMD ["vicepulse", "serve"]

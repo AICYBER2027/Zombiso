@@ -1,0 +1,116 @@
+{
+  "name": "VicePulse 03 - Select, script and render",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "15 5 * * *"
+            }
+          ]
+        }
+      },
+      "id": "455ac953-ad49-5bcb-8e43-d375b4ec7ffa",
+      "name": "Daily 05:15 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://worker:8088/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"args\": [\"daily\"]}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "30ae5d97-e969-522f-9a20-cf0170bcd976",
+      "name": "Daily: select + script + render + check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $vars.TELEGRAM_REVIEW_CHAT_ID }}",
+        "text": "=Daily run done. Waiting for approval: {{ $json.check.pending_approval.length }}, failed check: {{ $json.check.failed_check.length }}.",
+        "additionalFields": {
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "550c4611-bae7-5e22-a18d-dd917fecd687",
+      "name": "Summary",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        520,
+        300
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
+          "name": "VicePulse Telegram"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 05:15 UTC": {
+      "main": [
+        [
+          {
+            "node": "Daily: select + script + render + check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily: select + script + render + check": {
+      "main": [
+        [
+          {
+            "node": "Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "note": "Daily run for VicePulse EN and VicePulse BR (5 clips each)."
+  },
+  "tags": [
+    {
+      "name": "vicepulse"
+    }
+  ]
+}

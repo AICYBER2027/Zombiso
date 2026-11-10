@@ -259,7 +259,7 @@ def health(conn, settings: Settings, *, today: date | None = None) -> dict:
     pending = q("SELECT count(*) AS n FROM clips WHERE status = 'pending_approval'")[0]["n"]
     if pending:
         alerts.append(f"{pending} clips waiting for approval")
-    return {"ok": not alerts, "alerts": alerts, "live_publish": settings.allow_live_publish,
+    return {"healthy": not alerts, "alerts": alerts, "live_publish": settings.allow_live_publish,
             "llm_mode": settings.llm_mode, "game": settings.game}
 
 

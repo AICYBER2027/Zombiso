@@ -1,0 +1,314 @@
+{
+  "name": "VicePulse 04 - Approval queue",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "c63bfafd-7dcb-551a-9ecd-5e81f0497569",
+      "name": "Daily 06:30 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://worker:8088/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"args\": [\"queue\"]}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "725ed36a-743c-546b-a1bb-f95c3c6b52a4",
+      "name": "Approval queue",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return $json.pending.map(c => ({ json: c }));"
+      },
+      "id": "8d5b8c38-9dd2-5b0e-8c3e-65f1cec78774",
+      "name": "One item per clip",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $vars.TELEGRAM_REVIEW_CHAT_ID }}",
+        "text": "=<b>Clip {{ $json.id }}</b> ({{ $json.channel }}, {{ $json.for_date }})\n{{ $json.hook }}\nFiles: {{ $json.files.join(', ') }}\nDecide here: {{ $vars.N8N_PUBLIC_URL }}/form/vicepulse-approve?clip={{ $json.id }}",
+        "additionalFields": {
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "48f51ba6-0524-5e01-a653-e7462bf55e08",
+      "name": "Ask reviewer",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        780,
+        300
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
+          "name": "VicePulse Telegram"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "path": "vicepulse-approve",
+        "formTitle": "VicePulse clip approval",
+        "formDescription": "Watch all three renders before deciding. Nothing here is pre-selected on purpose.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Clip id",
+              "fieldType": "number",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Reviewer",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Decision",
+              "fieldType": "dropdown",
+              "requiredField": true,
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "approve"
+                  },
+                  {
+                    "option": "reject"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Reason (if rejecting)"
+            },
+            {
+              "fieldLabel": "TikTok privacy level",
+              "fieldType": "dropdown",
+              "requiredField": true,
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "SELF_ONLY"
+                  },
+                  {
+                    "option": "MUTUAL_FOLLOW_FRIENDS"
+                  },
+                  {
+                    "option": "FOLLOWER_OF_CREATOR"
+                  },
+                  {
+                    "option": "PUBLIC_TO_EVERYONE"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "TikTok interactions",
+              "fieldType": "checkbox",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Allow comments"
+                  },
+                  {
+                    "option": "Allow Duet"
+                  },
+                  {
+                    "option": "Allow Stitch"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "TikTok commercial content",
+              "fieldType": "checkbox",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Your brand"
+                  },
+                  {
+                    "option": "Branded content"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Consent",
+              "fieldType": "checkbox",
+              "requiredField": true,
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "I agree to TikTok's Music Usage Confirmation"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0eb92b00-ca88-5042-abaa-98dba7f9a809",
+      "name": "Approval form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        1040,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $json;\nconst ticks = j['TikTok interactions'] || [];\nconst commercial = j['TikTok commercial content'] || [];\nconst tiktok = {\n  privacy_level: j['TikTok privacy level'],\n  allow_comment: ticks.includes('Allow comments'),\n  allow_duet: ticks.includes('Allow Duet'),\n  allow_stitch: ticks.includes('Allow Stitch'),\n  your_brand: commercial.includes('Your brand'),\n  branded_content: commercial.includes('Branded content'),\n  consent_confirmed: (j['Consent'] || []).length === 1,\n};\nif (tiktok.branded_content && tiktok.privacy_level === 'SELF_ONLY') {\n  throw new Error('Branded content cannot be private on TikTok. Pick another privacy level.');\n}\nconst args = ['decide', '--clip', String(j['Clip id']), '--decision', j['Decision'], '--by', j['Reviewer'],\n              '--tiktok-options', JSON.stringify(tiktok)];\nif (j['Reason (if rejecting)']) args.push('--reason', j['Reason (if rejecting)']);\nreturn [{ json: { args } }];"
+      },
+      "id": "80b02404-5124-5285-b331-31dc15892691",
+      "name": "Build decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://worker:8088/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ args: $json.args }) }}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "67acdcc9-2103-5e62-856f-3895eca4a729",
+      "name": "Record decision",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 06:30 UTC": {
+      "main": [
+        [
+          {
+            "node": "Approval queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approval queue": {
+      "main": [
+        [
+          {
+            "node": "One item per clip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One item per clip": {
+      "main": [
+        [
+          {
+            "node": "Ask reviewer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approval form": {
+      "main": [
+        [
+          {
+            "node": "Build decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build decision": {
+      "main": [
+        [
+          {
+            "node": "Record decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "note": "Sends each clip to the reviewer; the reviewer decides in an n8n form. TikTok requires the person to choose privacy and interaction settings for every post, with no defaults."
+  },
+  "tags": [
+    {
+      "name": "vicepulse"
+    }
+  ]
+}

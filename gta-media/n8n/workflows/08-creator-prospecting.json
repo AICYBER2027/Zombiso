@@ -1,0 +1,245 @@
+{
+  "name": "VicePulse 08 - Creator prospecting",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "fc52dd92-1f83-5b83-9990-922b5466ecff",
+      "name": "Mondays 09:00 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/youtube/v3/search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "part",
+              "value": "snippet"
+            },
+            {
+              "name": "type",
+              "value": "channel"
+            },
+            {
+              "name": "q",
+              "value": "GTA 6 gameplay"
+            },
+            {
+              "name": "relevanceLanguage",
+              "value": "en"
+            },
+            {
+              "name": "maxResults",
+              "value": "25"
+            },
+            {
+              "name": "key",
+              "value": "={{ $vars.YOUTUBE_DATA_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "082e273b-f3ec-5164-adbc-bc416ceebe85",
+      "name": "YouTube channel search (en)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/youtube/v3/search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "part",
+              "value": "snippet"
+            },
+            {
+              "name": "type",
+              "value": "channel"
+            },
+            {
+              "name": "q",
+              "value": "GTA 6 gameplay português"
+            },
+            {
+              "name": "relevanceLanguage",
+              "value": "pt"
+            },
+            {
+              "name": "maxResults",
+              "value": "25"
+            },
+            {
+              "name": "key",
+              "value": "={{ $vars.YOUTUBE_DATA_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "5a741af4-6ebc-553d-86af-3440509b6135",
+      "name": "YouTube channel search (pt)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "numberInputs": 2
+      },
+      "id": "02592c5e-cbe9-570e-9b9e-bdced9104d77",
+      "name": "Merge",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const out = [];\nfor (const item of $input.all()) {\n  for (const r of (item.json.items || [])) {\n    out.push({ platform: 'youtube', channel_ref: r.snippet.channelId, display_name: r.snippet.channelTitle,\n               language: /portugu/i.test(r.snippet.description || '') ? 'pt-BR' : 'en' });\n  }\n}\nreturn [{ json: { args: ['prospects-add', '--json', JSON.stringify(out)] } }];"
+      },
+      "id": "407b3797-6442-5dbe-b008-a54f6efa259b",
+      "name": "To prospects",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://worker:8088/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ args: $json.args }) }}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "27fe0e13-2075-5669-a06a-5b57c67eff43",
+      "name": "Store prospects",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1300,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Mondays 09:00 UTC": {
+      "main": [
+        [
+          {
+            "node": "YouTube channel search (en)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "YouTube channel search (pt)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "YouTube channel search (en)": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "YouTube channel search (pt)": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "To prospects",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "To prospects": {
+      "main": [
+        [
+          {
+            "node": "Store prospects",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "note": "Weekly. Finds GTA creators to contact for a written licence. It stores names and channel ids only; it never downloads anyone's videos."
+  },
+  "tags": [
+    {
+      "name": "vicepulse"
+    }
+  ]
+}

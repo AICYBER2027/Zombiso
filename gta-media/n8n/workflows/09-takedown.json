@@ -1,0 +1,139 @@
+{
+  "name": "VicePulse 09 - Takedown",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "vicepulse-takedown",
+        "formTitle": "VicePulse takedown",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "What",
+              "fieldType": "dropdown",
+              "requiredField": true,
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "clip"
+                  },
+                  {
+                    "option": "source"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Id",
+              "fieldType": "number",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Reason",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "6b13c606-57b9-520c-ac69-4ffbb59af9e2",
+      "name": "Takedown form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://worker:8088/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ args: [\"takedown\", \"--\" + $json[\"What\"], String($json[\"Id\"]), \"--reason\", $json[\"Reason\"]] }) }}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "eee66832-e008-5732-9732-39fcfd5546c4",
+      "name": "Take down",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $vars.TELEGRAM_REVIEW_CHAT_ID }}",
+        "text": "=Takedown done. Removed via API: {{ $json.removed.length }}. Remove by hand: {{ $json.manual_removal_needed.map(m => m.platform + ' ' + m.channel + ' ' + (m.url || m.external_id)).join('; ') || 'none' }}",
+        "additionalFields": {
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "f5f28bb5-0c02-527b-9b9c-88cfda9d0a63",
+      "name": "Manual removals needed",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        520,
+        300
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
+          "name": "VicePulse Telegram"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Takedown form": {
+      "main": [
+        [
+          {
+            "node": "Take down",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Take down": {
+      "main": [
+        [
+          {
+            "node": "Manual removals needed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "note": "Manual trigger. Removes a clip (or everything from a source) everywhere the API allows and lists the posts a person must delete by hand (Instagram and TikTok have no delete API)."
+  },
+  "tags": [
+    {
+      "name": "vicepulse"
+    }
+  ]
+}

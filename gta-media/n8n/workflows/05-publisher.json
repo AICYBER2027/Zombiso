@@ -1,0 +1,195 @@
+{
+  "name": "VicePulse 05 - Publisher",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/15 * * * *"
+            }
+          ]
+        }
+      },
+      "id": "e7179998-45d1-5ca0-be2d-cad4774a097b",
+      "name": "Every 15 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://worker:8088/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"args\": [\"schedule\"]}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "e369daff-4ceb-5dcf-a07a-5efb9262a65f",
+      "name": "Schedule approved clips",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://worker:8088/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"args\": [\"publish\"]}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "e31c3d56-af06-503d-bd54-2fc5849fecd2",
+      "name": "Publish due posts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c5fb7c27-faf5-5d30-b2e5-0aa3f21be089",
+              "leftValue": "={{ $json.failed.length + $json.blocked.length > 0 }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "2eb09477-3a5c-592a-9a0a-64371f0a3b47",
+      "name": "Anything failed or blocked?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $vars.TELEGRAM_REVIEW_CHAT_ID }}",
+        "text": "=Publish problems. Failed: {{ $json.failed.join(', ') }}. Blocked: {{ $json.blocked.join(', ') }}. Run the health check for details.",
+        "additionalFields": {
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "808b124f-6986-587c-ac0c-1a12b322ac5d",
+      "name": "Alert: publish problem",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1040,
+        300
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
+          "name": "VicePulse Telegram"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 15 minutes": {
+      "main": [
+        [
+          {
+            "node": "Schedule approved clips",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule approved clips": {
+      "main": [
+        [
+          {
+            "node": "Publish due posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish due posts": {
+      "main": [
+        [
+          {
+            "node": "Anything failed or blocked?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anything failed or blocked?": {
+      "main": [
+        [
+          {
+            "node": "Alert: publish problem",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "note": "Every 15 minutes: schedule approved clips, then post what is due. Dry run unless VICEPULSE_ALLOW_LIVE_PUBLISH=1 and the account row is enabled."
+  },
+  "tags": [
+    {
+      "name": "vicepulse"
+    }
+  ]
+}

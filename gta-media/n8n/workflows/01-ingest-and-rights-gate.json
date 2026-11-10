@@ -1,0 +1,160 @@
+{
+  "name": "VicePulse 01 - Ingest and rights gate",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "vicepulse/ingest",
+        "authentication": "headerAuth",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "92e4863b-03dc-51cb-bb0f-19b436869386",
+      "name": "New footage webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://worker:8088/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ args: [\"ingest\", \"--file\", $json.body.file, \"--origin\", $json.body.origin].concat($json.body.rights_id ? [\"--rights-id\", String($json.body.rights_id)] : []) }) }}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "9e517b84-079a-51df-aeb3-d5a9a06f8b0f",
+      "name": "Ingest + rights gate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "bd5e8076-7557-5fa9-aa13-4720a97b63e5",
+              "leftValue": "={{ $json.status }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "rightValue": "quarantined"
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "ead01aff-5749-5e8e-aaae-b27484609ebc",
+      "name": "Quarantined?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        520,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $vars.TELEGRAM_REVIEW_CHAT_ID }}",
+        "text": "=Footage quarantined (source {{ $json.source_id }}): {{ $json.reasons.join('; ') }}",
+        "additionalFields": {
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "b8d55939-e11d-5744-ac86-d0bcd7973065",
+      "name": "Alert: quarantined",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        780,
+        300
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
+          "name": "VicePulse Telegram"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "New footage webhook": {
+      "main": [
+        [
+          {
+            "node": "Ingest + rights gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ingest + rights gate": {
+      "main": [
+        [
+          {
+            "node": "Quarantined?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Quarantined?": {
+      "main": [
+        [
+          {
+            "node": "Alert: quarantined",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "note": "Called by the storage sync (or the creator upload form) for each new file."
+  },
+  "tags": [
+    {
+      "name": "vicepulse"
+    }
+  ]
+}

@@ -1,0 +1,275 @@
+{
+  "name": "VicePulse 07 - Trend and topic scan",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 */4 * * *"
+            }
+          ]
+        }
+      },
+      "id": "e197cb91-f197-5451-9ce6-bcec1dd290b7",
+      "name": "Every 4 hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.ROCKSTAR_NEWSWIRE_FEED_URL }}",
+        "options": {}
+      },
+      "id": "3f1e2828-7a46-5582-929e-4fa45295a814",
+      "name": "Rockstar Newswire feed",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [
+        260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/youtube/v3/videos",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "part",
+              "value": "snippet"
+            },
+            {
+              "name": "chart",
+              "value": "mostPopular"
+            },
+            {
+              "name": "videoCategoryId",
+              "value": "20"
+            },
+            {
+              "name": "regionCode",
+              "value": "US"
+            },
+            {
+              "name": "maxResults",
+              "value": "25"
+            },
+            {
+              "name": "key",
+              "value": "={{ $vars.YOUTUBE_DATA_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b6ed36b3-254f-5554-80f2-a70210af27c3",
+      "name": "YouTube trending gaming (US)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/youtube/v3/videos",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "part",
+              "value": "snippet"
+            },
+            {
+              "name": "chart",
+              "value": "mostPopular"
+            },
+            {
+              "name": "videoCategoryId",
+              "value": "20"
+            },
+            {
+              "name": "regionCode",
+              "value": "BR"
+            },
+            {
+              "name": "maxResults",
+              "value": "25"
+            },
+            {
+              "name": "key",
+              "value": "={{ $vars.YOUTUBE_DATA_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "58257141-c38f-506a-9e8c-3f48360cf5cd",
+      "name": "YouTube trending gaming (BR)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const out = [];\nfor (const item of $input.all()) {\n  const j = item.json;\n  if (j.title && j.link) out.push({ topic: j.title, source: 'rockstar_newswire', score: 5, language: 'en' });\n  for (const v of (j.items || [])) {\n    const t = v.snippet.title;\n    if (!/gta|grand theft auto/i.test(t)) continue;\n    const br = (v.snippet.defaultAudioLanguage || '').startsWith('pt');\n    out.push({ topic: t, source: 'youtube_trending_gaming', score: 3, language: br ? 'pt-BR' : 'en' });\n  }\n}\nreturn [{ json: { args: ['topics-add', '--json', JSON.stringify(out)] } }];"
+      },
+      "id": "a98bf0cc-76cc-5ce9-9e35-6c4516a46b75",
+      "name": "To topics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://worker:8088/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ args: $json.args }) }}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "3fbbd4c1-2d42-5376-8c35-6cc217f98f8e",
+      "name": "Store topics",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1300,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "numberInputs": 3
+      },
+      "id": "053c8b25-f67f-5c84-acae-c44880e9d332",
+      "name": "Merge",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        1560,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Every 4 hours": {
+      "main": [
+        [
+          {
+            "node": "Rockstar Newswire feed",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "YouTube trending gaming (US)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "YouTube trending gaming (BR)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rockstar Newswire feed": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "YouTube trending gaming (US)": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "YouTube trending gaming (BR)": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "To topics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "To topics": {
+      "main": [
+        [
+          {
+            "node": "Store topics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "note": "Every 4 hours. Reads public feeds only; produces topics, never footage. The Rockstar feed URL and YouTube API key are placeholders to fill in."
+  },
+  "tags": [
+    {
+      "name": "vicepulse"
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+{
+  "name": "VicePulse 06 - Analytics pull",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 2 * * *"
+            }
+          ]
+        }
+      },
+      "id": "3310cf64-40c9-565b-add2-eb29ade755f9",
+      "name": "Nightly 02:30 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://worker:8088/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"args\": [\"analytics\"]}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "2df9a093-11cb-593f-9bd2-aaa4d16e8712",
+      "name": "Pull analytics",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Nightly 02:30 UTC": {
+      "main": [
+        [
+          {
+            "node": "Pull analytics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "note": "Nightly metrics for everything published in the last 30 days."
+  },
+  "tags": [
+    {
+      "name": "vicepulse"
+    }
+  ]
+}
