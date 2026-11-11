@@ -244,13 +244,15 @@ return [{ json: { args: ['topics-add', '--json', JSON.stringify(out)] } }];""".s
              "TWITCH_CLIENT_SECRET); without them the steps report 'skipped'.")
     t1 = f.cron("Every 6 hours", "10 */6 * * *")
     d = f.worker("Discover creators", ["discover"])
+    l1 = f.worker("Check channel languages", ["languages"])
     p1 = f.worker("Check clipping permissions", ["permissions"])
     r1 = f.worker("Rank creators", ["rank"])
-    f.chain(t1, d, p1, r1)
+    f.chain(t1, d, l1, p1, r1)
     t2 = f.cron("Every 20 minutes", "*/20 * * * *")
     m = f.worker("Monitor uploads and live streams", ["monitor"])
+    l2 = f.worker("Re-check channel languages", ["languages"])
     r2 = f.worker("Re-rank creators", ["rank"])
-    f.chain(t2, m, r2)
+    f.chain(t2, m, l2, r2)
     flows.append(f)
 
     f = Flow(9, "Takedown", "Manual trigger. Removes a clip (or everything from a source) everywhere the API allows "

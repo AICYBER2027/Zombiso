@@ -177,7 +177,11 @@ def cmd_permissions(a, s, conn):
 
 
 def cmd_creators(a, s, conn):
-    return {"creators": discovery.creator_report(conn, a.limit)}
+    return {"creators": discovery.creator_report(conn, a.limit, a.include_excluded)}
+
+
+def cmd_languages(a, s, conn):
+    return discovery.classify_languages(conn, discovery.load_config())
 
 
 def cmd_opportunities(a, s, conn):
@@ -262,6 +266,8 @@ def build_parser() -> argparse.ArgumentParser:
     add("permissions", cmd_permissions, "scan creators' public text for clipping / reupload statements")
     sp = add("creators", cmd_creators, "list ranked creators with their permission status")
     sp.add_argument("--limit", type=int, default=50)
+    sp.add_argument("--include-excluded", action="store_true", help="also list channels excluded for language")
+    add("languages", cmd_languages, "detect channel languages; stop monitoring confirmed non-EN/PT channels")
     sp = add("opportunities", cmd_opportunities, "GTA livestreams now and fresh GTA uploads, ranked by reach")
     sp.add_argument("--limit", type=int, default=30)
     sp.add_argument("--per-creator", type=int, default=2)

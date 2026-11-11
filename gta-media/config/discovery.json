@@ -104,5 +104,7 @@
   "gta_focus_floor": 0.25,
   "other_language_factor": 0.25,
   "_scoring": "creator score = 100 x weighted(audience, engagement, viral, live_now) x GTA factor x language factor; GTA factor = floor + (1 - floor) x GTA share of recent content, floor rising from gta_focus_floor (1M followers or less) to star_focus_floor (50M+), because big audiences follow a star into GTA. 'vicepulse opportunities' ranks individual GTA lives and fresh uploads by reach.",
-  "star_focus_floor": 0.9
+  "star_focus_floor": 0.9,
+  "unknown_language_factor": 0.85,
+  "_languages": "Only English and Portuguese (pt-BR) creators are monitored. 'vicepulse languages' detects each channel's language from platform language fields, country, titles and descriptions; channels confirmed to be in another language stop being monitored (records kept; seeds are never excluded automatically). Unknown-language channels stay and count x unknown_language_factor."
 }

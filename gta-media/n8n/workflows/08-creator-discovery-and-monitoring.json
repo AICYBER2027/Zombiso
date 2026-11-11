@@ -57,6 +57,34 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
+        "jsonBody": "{\"args\": [\"languages\"]}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "8890959f-b428-5c32-8d37-be3254c4aa64",
+      "name": "Check channel languages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://worker:8088/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
         "jsonBody": "{\"args\": [\"permissions\"]}",
         "options": {
           "timeout": 3600000
@@ -67,7 +95,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        520,
+        780,
         300
       ],
       "credentials": {
@@ -95,7 +123,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        780,
+        1040,
         300
       ],
       "credentials": {
@@ -121,7 +149,7 @@
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
       "position": [
-        1040,
+        1300,
         300
       ]
     },
@@ -143,7 +171,35 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1300,
+        1560,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://worker:8088/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"args\": [\"languages\"]}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "b732467d-bd6e-532a-8952-9f37c79a3c89",
+      "name": "Re-check channel languages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1820,
         300
       ],
       "credentials": {
@@ -171,7 +227,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1560,
+        2080,
         300
       ],
       "credentials": {
@@ -195,6 +251,17 @@
       ]
     },
     "Discover creators": {
+      "main": [
+        [
+          {
+            "node": "Check channel languages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check channel languages": {
       "main": [
         [
           {
@@ -228,6 +295,17 @@
       ]
     },
     "Monitor uploads and live streams": {
+      "main": [
+        [
+          {
+            "node": "Re-check channel languages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Re-check channel languages": {
       "main": [
         [
           {

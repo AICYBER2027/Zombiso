@@ -108,6 +108,12 @@ watches GTA creators through official APIs only, the YouTube Data API v3 (API ke
   views per day, whichever is higher) and live viewers, times a GTA factor and a language factor. Big stars
   keep most of their score even when GTA is a small part of their channel, because their audience follows
   them into the game; mid-size channels with one GTA video drop. Weights are in `config/discovery.json`.
+- **Languages (strict EN / PT-BR):** `vicepulse languages` detects each channel's language from YouTube and
+  Twitch language fields, the channel's country, and the words in titles and descriptions. Channels confirmed
+  to be in another language are not added, and existing ones stop being monitored (`tracked = false`, with the
+  reason); their records are kept and `vicepulse creators --include-excluded` still lists them. Seed creators
+  are never excluded automatically. Unknown-language channels stay, are re-checked every run, and rank a little
+  below confirmed English / Portuguese ones.
 - **Opportunities (what to clip now):** `vicepulse opportunities` ranks individual GTA livestreams happening
   now and GTA uploads from the last 72 hours by reach, with each creator's permission status.
 - **Permissions:** scans channel and video descriptions for what the creator says about clipping

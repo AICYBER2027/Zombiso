@@ -14,7 +14,7 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from statistics import median
 
-from . import creator_policy, db
+from . import creator_policy, db, language
 from .config import PACKAGE_ROOT
 from .sources import QuotaExceeded, SourceError, iso_duration_s, twitch_duration_s
 from .sources.twitch import Twitch
@@ -205,7 +205,9 @@ def _save_tw_user(conn, tw: Twitch, u: dict, *, via: str, name: str | None = Non
 # ---------------------------------------------------------------- discover
 
 def discover(conn, cfg: dict, yt: YouTubeData | None, tw: Twitch | None) -> dict:
-    out = {"seeds_resolved": [], "seeds_not_found": [], "new_channels": [], "skipped_small": 0, "errors": []}
+    out = {"seeds_resolved": [], "seeds_not_found": [], "new_channels": [], "skipped_small": 0,
+           "skipped_language": [], "errors": []}
+    targets = tuple(cfg.get("target_languages", list(language.TARGETS)))
     limit = cfg.get("max_new_creators_per_run", 25)
     min_f = cfg.get("min_followers", 0)
 
@@ -264,7 +266,16 @@ def discover(conn, cfg: dict, yt: YouTubeData | None, tw: Twitch | None) -> dict
                     continue
                 if len(out["new_channels"]) >= limit:
                     break
-                lang = "pt-BR" if (ch.get("snippet", {}).get("country") == "BR") else None
+                sn = ch.get("snippet", {})
+                verdict = language.classify_channel(
+                    country=sn.get("country"), description=sn.get("description"),
+                    items=[{"language": v["snippet"].get("defaultAudioLanguage") or v["snippet"].get("defaultLanguage"),
+                            "text": f"{v['snippet'].get('title', '')} {(v['snippet'].get('description') or '')[:400]}"}
+                           for v in by_channel.get(ch["id"], [])])
+                if language.off_target(verdict, targets):
+                    out["skipped_language"].append(f"{sn.get('title')} ({verdict['language']})")
+                    continue
+                lang = "pt-BR" if (verdict["language"] == "pt" or sn.get("country") == "BR") else verdict["language"]
                 row = _save_yt_channel(conn, ch, via="youtube_search", language=lang)
                 out["new_channels"].append(row["title"])
                 known.add(ch["id"])
@@ -411,6 +422,43 @@ def monitor(conn, cfg: dict, yt: YouTubeData | None, tw: Twitch | None, *, uploa
     return out
 
 
+# ---------------------------------------------------------------- language
+
+def classify_languages(conn, cfg: dict) -> dict:
+    """Detect each tracked channel's language; stop monitoring confirmed off-target channels (records are kept).
+
+    Seed creators are never excluded automatically: they are on the list because the owner chose them.
+    """
+    targets = tuple(cfg.get("target_languages", list(language.TARGETS)))
+    out = {"checked": 0, "target": 0, "unknown": 0, "excluded": []}
+    rows = conn.execute("""SELECT cc.*, cr.seed, cr.display_name FROM creator_channels cc
+                           JOIN creators cr ON cr.id = cc.creator_id WHERE cc.tracked ORDER BY cc.id""").fetchall()
+    for ch in rows:
+        items = [{"language": r["language"], "text": f"{r['title'] or ''} {(r['description'] or '')[:400]}"}
+                 for r in conn.execute("""SELECT language, title, description FROM creator_content WHERE channel_id = %s
+                                          ORDER BY last_seen_at DESC LIMIT 40""", (ch["id"],)).fetchall()]
+        declared = ch["language"] if (ch["seed"] or ch["platform"] == "twitch") else None
+        verdict = language.classify_channel(country=ch["country"], description=ch["description"], items=items,
+                                            declared=declared)
+        conn.execute("""UPDATE creator_channels SET detected_language = %s, language_confidence = %s,
+                        language_evidence = %s, language_checked_at = now() WHERE id = %s""",
+                     (verdict["language"], verdict["confidence"], db.Jsonb(verdict["evidence"]), ch["id"]))
+        out["checked"] += 1
+        if language.off_target(verdict, targets) and not ch["seed"]:
+            reason = f"language:{verdict['language']} (confidence {verdict['confidence']})"
+            conn.execute("""UPDATE creator_channels SET tracked = FALSE, excluded_reason = %s, excluded_at = now()
+                            WHERE id = %s""", (reason, ch["id"]))
+            db.log_event(conn, "language", "creator_channel", ch["id"], "excluded", verdict)
+            out["excluded"].append({"channel": ch["title"] or ch["display_name"], "platform": ch["platform"],
+                                    "language": verdict["language"], "confidence": verdict["confidence"]})
+        elif verdict["language"] in targets:
+            out["target"] += 1
+        else:
+            out["unknown"] += 1
+    conn.commit()
+    return out
+
+
 # ---------------------------------------------------------------- rank
 
 def _clamp(x: float) -> float:
@@ -423,7 +471,8 @@ def _lang(code: str | None) -> str | None:
 
 def score_creator(channels: list[dict], content: list[dict], weights: dict, now: datetime | None = None, *,
                   target_languages: tuple[str, ...] = ("en", "pt"), gta_floor: float = 0.25,
-                  star_floor: float = 0.9, other_language_factor: float = 0.25) -> dict:
+                  star_floor: float = 0.9, other_language_factor: float = 0.25,
+                  unknown_language_factor: float = 0.85, known_language: str | None = None) -> dict:
     """Pure scoring; each part is 0..1 and the total is 0..100.
 
     total = 100 x weighted(audience, engagement, viral, live_now) x GTA factor x language factor
@@ -458,10 +507,14 @@ def score_creator(channels: list[dict], content: list[dict], weights: dict, now:
     live = [c for c in content if c.get("kind") == "live" and (c.get("game") in weights_game)]
     live_now = _clamp(math.log10(max([c.get("live_viewers") or 0 for c in live] or [0]) + 1) / 5)
     langs = [_lang(c.get("language")) for c in recent if c.get("language")]
-    dominant = max(set(langs), key=langs.count) if langs else None
+    dominant = _lang(known_language) or (max(set(langs), key=langs.count) if langs else None)
     if dominant is None:
         dominant = next((_lang(c.get("language")) for c in channels if c.get("language")), None)
-    language_fit = 1.0 if dominant is None or dominant in target_languages else other_language_factor
+    # Confirmed English / Portuguese first, unknown slightly behind, other languages well behind.
+    if dominant is None:
+        language_fit = unknown_language_factor
+    else:
+        language_fit = 1.0 if dominant in target_languages else other_language_factor
     base_parts = {"audience": audience, "engagement": engagement, "viral": viral, "live_now": live_now}
     wsum = sum(weights.get(k, 0) for k in base_parts) or 1e-9
     base = sum(weights.get(k, 0) * v for k, v in base_parts.items()) / wsum
@@ -481,12 +534,16 @@ def score_creator(channels: list[dict], content: list[dict], weights: dict, now:
 def rank(conn, cfg: dict) -> list[dict]:
     weights = cfg.get("score_weights", {})
     out = []
-    for cr in conn.execute("SELECT * FROM creators ORDER BY id").fetchall():
-        chans = conn.execute("SELECT * FROM creator_channels WHERE creator_id = %s", (cr["id"],)).fetchall()
+    for cr in conn.execute("""SELECT * FROM creators WHERE EXISTS (SELECT 1 FROM creator_channels cc
+                              WHERE cc.creator_id = creators.id AND cc.tracked) ORDER BY id""").fetchall():
+        chans = conn.execute("SELECT * FROM creator_channels WHERE creator_id = %s AND tracked", (cr["id"],)).fetchall()
         content = conn.execute("""SELECT ct.* FROM creator_content ct JOIN creator_channels cc ON cc.id = ct.channel_id
-                                  WHERE cc.creator_id = %s AND ct.last_seen_at > now() - interval '21 days'""",
+                                  WHERE cc.creator_id = %s AND cc.tracked AND ct.last_seen_at > now() - interval '21 days'""",
                                (cr["id"],)).fetchall()
-        s = score_creator(chans, content, weights,
+        detected = [c["detected_language"] for c in chans if c["detected_language"]]
+        known = next((d for d in detected if d in cfg.get("target_languages", ["en", "pt"])), detected[0] if detected else None)
+        s = score_creator(chans, content, weights, known_language=known,
+                          unknown_language_factor=cfg.get("unknown_language_factor", 0.85),
                           target_languages=tuple(cfg.get("target_languages", ["en", "pt"])),
                           gta_floor=cfg.get("gta_focus_floor", 0.25), star_floor=cfg.get("star_focus_floor", 0.9),
                           other_language_factor=cfg.get("other_language_factor", 0.25))
@@ -606,19 +663,24 @@ def opportunities(conn, limit: int = 30, per_creator: int = 2, cfg: dict | None 
     cfg = cfg or load_config()
     targets = tuple(cfg.get("target_languages", ["en", "pt"]))
     other = cfg.get("other_language_factor", 0.25)
+    unknown = cfg.get("unknown_language_factor", 0.85)
     rows = conn.execute(
-        """SELECT ct.*, cc.platform AS ch_platform, cc.handle, cc.followers, cc.language AS channel_language,
+        """SELECT ct.*, cc.platform AS ch_platform, cc.handle, cc.followers,
+                  COALESCE(cc.detected_language, cc.language) AS channel_language,
                   cr.id AS creator_id, cr.display_name,
                   cr.permission_status, cr.rights_id
            FROM creator_content ct JOIN creator_channels cc ON cc.id = ct.channel_id JOIN creators cr ON cr.id = cc.creator_id
-           WHERE ct.game IN ('gta6', 'gta5')
+           WHERE ct.game IN ('gta6', 'gta5') AND cc.tracked
              AND (ct.kind = 'live' OR (ct.kind IN ('upload', 'past_live')
                   AND COALESCE(ct.published_at, ct.actual_start) > now() - interval '72 hours'))""").fetchall()
     scored = []
     for r in rows:
         score = score_opportunity(r, r["followers"] or 0)
-        lang = _lang(r["language"]) or _lang(r["channel_language"])
-        if lang and lang not in targets:
+        lang = _lang(r["language"]) or _lang(r["channel_language"]) or language.detect_text(
+            f"{r['title'] or ''} {(r['description'] or '')[:400]}")[0]
+        if lang is None:
+            score = round(score * unknown, 2)
+        elif lang not in targets:
             score = round(score * other, 2)
         if score > 0:
             scored.append((score, r))
@@ -630,7 +692,8 @@ def opportunities(conn, limit: int = 30, per_creator: int = 2, cfg: dict | None 
         out.append({"score": score, "creator": r["display_name"], "creator_id": r["creator_id"],
                     "kind": r["kind"], "game": r["game"], "title": r["title"], "url": r["url"],
                     "live_viewers": r["live_viewers"], "views": r["views"], "followers": r["followers"],
-                    "language": _lang(r["language"]) or _lang(r["channel_language"]),
+                    "language": _lang(r["language"]) or _lang(r["channel_language"]) or language.detect_text(
+                        f"{r['title'] or ''} {(r['description'] or '')[:400]}")[0],
                     "published_at": r["published_at"], "permission": r["permission_status"],
                     "usable": r["permission_status"] == "authorized" and r["rights_id"] is not None})
         if len(out) >= limit:
@@ -638,9 +701,14 @@ def opportunities(conn, limit: int = 30, per_creator: int = 2, cfg: dict | None 
     return out
 
 
-def creator_report(conn, limit: int = 50) -> list[dict]:
+def creator_report(conn, limit: int = 50, include_excluded: bool = False) -> list[dict]:
     return conn.execute(
         """SELECT cr.id, cr.display_name, cr.permission_status, cr.permission_summary, cr.rights_id,
+                  (SELECT string_agg(DISTINCT cc.detected_language, ',') FROM creator_channels cc
+                    WHERE cc.creator_id = cr.id) AS detected_language,
+                  NOT EXISTS (SELECT 1 FROM creator_channels cc WHERE cc.creator_id = cr.id AND cc.tracked) AS excluded,
+                  (SELECT string_agg(cc.excluded_reason, '; ') FROM creator_channels cc
+                    WHERE cc.creator_id = cr.id AND NOT cc.tracked) AS excluded_reason,
                   s.total AS score, s.audience, s.engagement, s.viral, s.gta_focus, s.live_now,
                   s.detail->>'dominant_language' AS language, (s.detail->>'gta_factor')::float AS gta_factor,
                   (s.detail->>'language_fit')::float AS language_fit,
@@ -652,15 +720,17 @@ def creator_report(conn, limit: int = 50) -> list[dict]:
                     WHERE cc.creator_id = cr.id AND ct.game = 'gta6') AS gta6_items
            FROM creators cr
            LEFT JOIN LATERAL (SELECT * FROM creator_scores WHERE creator_id = cr.id ORDER BY scored_at DESC LIMIT 1) s ON TRUE
-           ORDER BY s.total DESC NULLS LAST, cr.id LIMIT %s""", (limit,)).fetchall()
+           WHERE %s OR EXISTS (SELECT 1 FROM creator_channels cc WHERE cc.creator_id = cr.id AND cc.tracked)
+           ORDER BY s.total DESC NULLS LAST, cr.id LIMIT %s""", (include_excluded, limit)).fetchall()
 
 
 def run_all(conn, cfg: dict, yt, tw, notes: list[str]) -> dict:
-    """discover -> monitor -> permissions -> rank, for the scheduled n8n workflow."""
+    """discover -> monitor -> languages -> permissions -> rank, for the scheduled n8n workflow."""
     d = discover(conn, cfg, yt, tw) if (yt or tw) else {"skipped": True}
     m = monitor(conn, cfg, yt, tw) if (yt or tw) else {"skipped": True}
+    lang = classify_languages(conn, cfg)
     p = check_permissions(conn)
     r = rank(conn, cfg)
-    return {"notes": notes, "discover": d, "monitor": m,
+    return {"notes": notes, "discover": d, "monitor": m, "languages": lang,
             "permissions": {s: sum(1 for x in p if x["status"] == s) for s in {x["status"] for x in p}},
             "top": r[:10], "date": date.today().isoformat()}
