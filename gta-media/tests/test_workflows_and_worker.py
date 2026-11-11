@@ -70,6 +70,9 @@ def test_workflow_structure(path):
         else:
             command = json.loads(body)["args"][0]
         assert command in COMMANDS, command
+    for n in wf["nodes"]:
+        if n["type"] == "n8n-nodes-base.telegram":
+            assert n.get("disabled") is True, "Telegram nodes must start disabled (no Telegram credential yet)"
     text = path.read_text()
     assert "$vars" not in text, "n8n Variables are a paid feature; use placeholders or credentials"
     assert not re.search(r"(sk-ant-|EAA[A-Za-z0-9]{20}|ya29\.)", text), "looks like a real secret"

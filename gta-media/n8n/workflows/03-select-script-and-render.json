@@ -70,7 +70,10 @@
           "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
           "name": "VicePulse Telegram"
         }
-      }
+      },
+      "disabled": true,
+      "notesInFlow": true,
+      "notes": "Disabled until the VicePulse Telegram credential and chat id are set"
     }
   ],
   "connections": {

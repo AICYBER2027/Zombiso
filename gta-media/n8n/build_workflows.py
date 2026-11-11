@@ -70,9 +70,14 @@ class Flow:
             "options": {"timeout": 3600000}}, creds=WORKER_CRED)
 
     def telegram(self, name: str, text: str, *, extra: dict | None = None) -> str:
-        return self.node(name, "n8n-nodes-base.telegram", 1.2,
-                         {"chatId": REVIEW_CHAT, "text": text, "additionalFields": {"parse_mode": "HTML", **(extra or {})}},
-                         creds=TELEGRAM_CRED)
+        # Telegram nodes start disabled: until the owner creates the "VicePulse Telegram" credential,
+        # an enabled Telegram node fails n8n's pre-run credential check and blocks the whole workflow.
+        n = self.node(name, "n8n-nodes-base.telegram", 1.2,
+                      {"chatId": REVIEW_CHAT, "text": text, "additionalFields": {"parse_mode": "HTML", **(extra or {})}},
+                      creds=TELEGRAM_CRED)
+        self.nodes[-1].update({"disabled": True, "notesInFlow": True,
+                               "notes": "Disabled until the VicePulse Telegram credential and chat id are set"})
+        return n
 
     def if_(self, name: str, left: str, op: str, right=None) -> str:
         cond = {"id": _id(f"{self.number}/{name}/c"), "leftValue": left,
