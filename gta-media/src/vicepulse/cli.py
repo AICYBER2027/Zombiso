@@ -181,7 +181,7 @@ def cmd_creators(a, s, conn):
 
 
 def cmd_opportunities(a, s, conn):
-    return {"opportunities": discovery.opportunities(conn, a.limit)}
+    return {"opportunities": discovery.opportunities(conn, a.limit, a.per_creator)}
 
 
 def cmd_creator_review(a, s, conn):
@@ -264,6 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--limit", type=int, default=50)
     sp = add("opportunities", cmd_opportunities, "GTA livestreams now and fresh GTA uploads, ranked by reach")
     sp.add_argument("--limit", type=int, default=30)
+    sp.add_argument("--per-creator", type=int, default=2)
     sp = add("creator-review", cmd_creator_review, "a person's permission decision for a creator")
     sp.add_argument("--creator", type=int, required=True)
     sp.add_argument("--decision", required=True, choices=["authorize", "deny", "needs_info"])

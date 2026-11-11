@@ -570,7 +570,7 @@ def review_creator(conn, creator_id: int, *, decision: str, by: str, evidence_ur
 def score_opportunity(item: dict, followers: int, now: datetime | None = None) -> float:
     """0..100: how much a single GTA livestream or upload is worth clipping right now.
 
-    Reach is what is actually happening (live viewers, or views per day for an upload), plus the creator's
+    Reach is what is actually happening (live viewers, or an upload's proven views), plus the creator's
     audience, because a star's GTA moment spreads far beyond the people watching it live.
     """
     now = now or _now()
@@ -582,17 +582,23 @@ def score_opportunity(item: dict, followers: int, now: datetime | None = None) -
         start = item.get("published_at") or item.get("actual_start")
         if not start:
             return 0.0
-        hours = max((now - start).total_seconds() / 3600, 1.0)
-        reach = (item.get("views") or 0) / hours * 24
-        fresh = _clamp(1 - (hours - 6) / 66)                                # full for 6 h, gone after 72 h
+        hours = (now - start).total_seconds() / 3600
+        if hours > 72:
+            return 0.0
+        views = item.get("views") or 0
+        # Proven reach: the larger of total views and views per day. Per-day speed is measured over at least
+        # 6 hours, so a one-hour-old video's first burst is not multiplied out to a whole day (first real run:
+        # a 4k-view video an hour old outranked a 2.3M-view one).
+        reach = max(views, views / max(hours, 6) * 24)
+        fresh = 1.0 if hours <= 24 else 1 - 0.3 * (hours - 24) / 48         # 1.0 for a day, 0.7 at 72 h
     reach_part = _clamp(math.log10(reach + 1) / 7)                          # 10M expected views -> 1.0
     audience_part = _clamp(math.log10(followers + 1) / 8)
     game = 1.0 if item.get("game") == "gta6" else 0.7
-    return round(100 * (0.6 * reach_part + 0.4 * audience_part) * game * fresh, 2)
+    return round(100 * (0.7 * reach_part + 0.3 * audience_part) * game * fresh, 2)
 
 
-def opportunities(conn, limit: int = 30) -> list[dict]:
-    """GTA livestreams happening now and fresh GTA uploads, best first, with the creator's permission status."""
+def opportunities(conn, limit: int = 30, per_creator: int = 2) -> list[dict]:
+    """GTA livestreams happening now and fresh GTA uploads, best first, at most ``per_creator`` per creator."""
     rows = conn.execute(
         """SELECT ct.*, cc.platform AS ch_platform, cc.handle, cc.followers, cr.id AS creator_id, cr.display_name,
                   cr.permission_status, cr.rights_id
@@ -600,17 +606,24 @@ def opportunities(conn, limit: int = 30) -> list[dict]:
            WHERE ct.game IN ('gta6', 'gta5')
              AND (ct.kind = 'live' OR (ct.kind IN ('upload', 'past_live')
                   AND COALESCE(ct.published_at, ct.actual_start) > now() - interval '72 hours'))""").fetchall()
-    out = []
+    scored = []
     for r in rows:
         score = score_opportunity(r, r["followers"] or 0)
-        if score <= 0:
+        if score > 0:
+            scored.append((score, r))
+    out, per = [], {}
+    for score, r in sorted(scored, key=lambda x: -x[0]):
+        if per.get(r["creator_id"], 0) >= per_creator:
             continue
+        per[r["creator_id"]] = per.get(r["creator_id"], 0) + 1
         out.append({"score": score, "creator": r["display_name"], "creator_id": r["creator_id"],
                     "kind": r["kind"], "game": r["game"], "title": r["title"], "url": r["url"],
                     "live_viewers": r["live_viewers"], "views": r["views"], "followers": r["followers"],
-                    "permission": r["permission_status"],
+                    "published_at": r["published_at"], "permission": r["permission_status"],
                     "usable": r["permission_status"] == "authorized" and r["rights_id"] is not None})
-    return sorted(out, key=lambda o: -o["score"])[:limit]
+        if len(out) >= limit:
+            break
+    return out
 
 
 def creator_report(conn, limit: int = 50) -> list[dict]:

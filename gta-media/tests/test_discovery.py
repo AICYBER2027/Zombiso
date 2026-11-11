@@ -390,3 +390,27 @@ def test_opportunities_rank_live_star_gta_moments_first(conn):
         discovery.score_opportunity({"kind": "live", "game": "gta6", "live_viewers": 8_000}, 500_000)
     assert discovery.score_opportunity({"kind": "upload", "game": "gta6", "views": 10**6,
                                         "published_at": NOW - timedelta(hours=80)}, 10**6) == 0   # too old
+
+
+def test_opportunity_fixes_from_real_data():
+    """Real run 2026-11-11: a 4k-view upload about an hour old outranked a 2.3M-view one; one creator filled the list."""
+    young = discovery.score_opportunity({"kind": "upload", "game": "gta6", "views": 4_330,
+                                         "published_at": NOW - timedelta(hours=1)}, 2_340_000)
+    proven = discovery.score_opportunity({"kind": "upload", "game": "gta6", "views": 2_288_285,
+                                          "published_at": NOW - timedelta(hours=50)}, 2_360_000)
+    assert proven > young
+    live_star = discovery.score_opportunity({"kind": "live", "game": "gta6", "live_viewers": 200_000}, 62_000_000)
+    assert live_star > proven                                            # a star live on GTA 6 is the top moment
+
+
+def test_opportunities_are_capped_per_creator(conn):
+    yt, tw = clients(conn)
+    discovery.discover(conn, {**CFG, "seeds": []}, yt, tw)
+    cid = conn.execute("SELECT id FROM creator_channels WHERE handle = '@gtabrasil'").fetchone()["id"]
+    for i in range(5):
+        discovery.upsert_content(conn, cid, "youtube", {"external_id": f"extra{i}", "kind": "upload", "game": "gta6",
+                                                       "views": 100_000 + i, "published_at": NOW - timedelta(hours=3)})
+    conn.commit()
+    ops = discovery.opportunities(conn)
+    assert sum(1 for o in ops if o["creator"] == "GTA Brasil Clips") == 2
+    assert sum(1 for o in discovery.opportunities(conn, per_creator=10) if o["creator"] == "GTA Brasil Clips") == 6
