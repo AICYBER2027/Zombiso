@@ -108,7 +108,7 @@
     },
     {
       "parameters": {
-        "chatId": "={{ $vars.TELEGRAM_REVIEW_CHAT_ID }}",
+        "chatId": "REPLACE_WITH_TELEGRAM_REVIEW_CHAT_ID",
         "text": "=Publish problems. Failed: {{ $json.failed.join(', ') }}. Blocked: {{ $json.blocked.join(', ') }}. Run the health check for details.",
         "additionalFields": {
           "parse_mode": "HTML"

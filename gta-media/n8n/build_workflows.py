@@ -7,6 +7,10 @@ http://worker:8088/run with body {"args": [<vicepulse CLI arguments>]}. The work
 n8n "Header Auth" credential named "VicePulse worker" (Authorization: Bearer <token>); the
 Telegram nodes use a credential named "VicePulse Telegram". Credential ids are placeholders:
 after importing, open each node once and pick the credential.
+
+Works on the free self-hosted n8n: no n8n Variables ($vars, a paid feature). Values that differ per
+install are plain REPLACE_WITH_... placeholders, and the YouTube Data API key is an n8n "Query Auth"
+credential named "YouTube Data API key" (query parameter name: key).
 """
 
 from __future__ import annotations
@@ -19,7 +23,9 @@ OUT = Path(__file__).parent / "workflows"
 WORKER_URL = "http://worker:8088/run"
 WORKER_CRED = {"httpHeaderAuth": {"id": "REPLACE_WITH_WORKER_CREDENTIAL_ID", "name": "VicePulse worker"}}
 TELEGRAM_CRED = {"telegramApi": {"id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID", "name": "VicePulse Telegram"}}
-REVIEW_CHAT = "={{ $vars.TELEGRAM_REVIEW_CHAT_ID }}"
+REVIEW_CHAT = "REPLACE_WITH_TELEGRAM_REVIEW_CHAT_ID"
+N8N_URL = "http://127.0.0.1:5678"   # change if n8n is reached at another address
+YOUTUBE_CRED = {"httpQueryAuth": {"id": "REPLACE_WITH_YOUTUBE_CREDENTIAL_ID", "name": "YouTube Data API key"}}
 
 
 def _id(seed: str) -> str:
@@ -121,7 +127,7 @@ def build() -> list[Flow]:
     split = f.code("One item per clip", "return $json.pending.map(c => ({ json: c }));")
     msg = f.telegram("Ask reviewer", "=<b>Clip {{ $json.id }}</b> ({{ $json.channel }}, {{ $json.for_date }})\n"
                                     "{{ $json.hook }}\nFiles: {{ $json.files.join(', ') }}\n"
-                                    "Decide here: {{ $vars.N8N_PUBLIC_URL }}/form/vicepulse-approve?clip={{ $json.id }}")
+                                    "Decide here: " + N8N_URL + "/form/vicepulse-approve?clip={{ $json.id }}")
     f.chain(t, q, split, msg)
     form = f.node("Approval form", "n8n-nodes-base.formTrigger", 2.2, {
         "path": "vicepulse-approve", "formTitle": "VicePulse clip approval",
@@ -183,24 +189,26 @@ return [{ json: { args } }];""".strip())
     flows.append(f)
 
     f = Flow(7, "Trend and topic scan", "Every 4 hours. Reads public feeds only; produces topics, never footage. "
-                                        "The Rockstar feed URL and YouTube API key are placeholders to fill in.")
+                                        "Fill in the Rockstar feed URL placeholder and attach the YouTube Data API key credential.")
     t = f.cron("Every 4 hours", "0 */4 * * *")
     rss = f.node("Rockstar Newswire feed", "n8n-nodes-base.rssFeedRead", 1.1,
-                 {"url": "={{ $vars.ROCKSTAR_NEWSWIRE_FEED_URL }}", "options": {}})
+                 {"url": "REPLACE_WITH_ROCKSTAR_NEWSWIRE_FEED_URL", "options": {}})
     yt_en = f.node("YouTube trending gaming (US)", "n8n-nodes-base.httpRequest", 4.2, {
         "method": "GET", "url": "https://www.googleapis.com/youtube/v3/videos", "sendQuery": True,
         "queryParameters": {"parameters": [
             {"name": "part", "value": "snippet"}, {"name": "chart", "value": "mostPopular"},
             {"name": "videoCategoryId", "value": "20"}, {"name": "regionCode", "value": "US"},
-            {"name": "maxResults", "value": "25"}, {"name": "key", "value": "={{ $vars.YOUTUBE_DATA_API_KEY }}"}]},
-        "options": {}})
+            {"name": "maxResults", "value": "25"}]},
+        "authentication": "genericCredentialType", "genericAuthType": "httpQueryAuth",
+        "options": {}}, creds=YOUTUBE_CRED)
     yt_br = f.node("YouTube trending gaming (BR)", "n8n-nodes-base.httpRequest", 4.2, {
         "method": "GET", "url": "https://www.googleapis.com/youtube/v3/videos", "sendQuery": True,
         "queryParameters": {"parameters": [
             {"name": "part", "value": "snippet"}, {"name": "chart", "value": "mostPopular"},
             {"name": "videoCategoryId", "value": "20"}, {"name": "regionCode", "value": "BR"},
-            {"name": "maxResults", "value": "25"}, {"name": "key", "value": "={{ $vars.YOUTUBE_DATA_API_KEY }}"}]},
-        "options": {}})
+            {"name": "maxResults", "value": "25"}]},
+        "authentication": "genericCredentialType", "genericAuthType": "httpQueryAuth",
+        "options": {}}, creds=YOUTUBE_CRED)
     to_topics = f.code("To topics", """
 const out = [];
 for (const item of $input.all()) {
@@ -232,8 +240,9 @@ return [{ json: { args: ['topics-add', '--json', JSON.stringify(out)] } }];""".s
             "queryParameters": {"parameters": [
                 {"name": "part", "value": "snippet"}, {"name": "type", "value": "channel"},
                 {"name": "q", "value": q}, {"name": "relevanceLanguage", "value": lang},
-                {"name": "maxResults", "value": "25"}, {"name": "key", "value": "={{ $vars.YOUTUBE_DATA_API_KEY }}"}]},
-            "options": {}}))
+                {"name": "maxResults", "value": "25"}]},
+            "authentication": "genericCredentialType", "genericAuthType": "httpQueryAuth",
+            "options": {}}, creds=YOUTUBE_CRED))
     merge = f.node("Merge", "n8n-nodes-base.merge", 3, {"numberInputs": 2})
     to_p = f.code("To prospects", """
 const out = [];

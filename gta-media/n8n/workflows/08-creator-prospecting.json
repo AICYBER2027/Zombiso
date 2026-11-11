@@ -47,13 +47,11 @@
             {
               "name": "maxResults",
               "value": "25"
-            },
-            {
-              "name": "key",
-              "value": "={{ $vars.YOUTUBE_DATA_API_KEY }}"
             }
           ]
         },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
         "options": {}
       },
       "id": "082e273b-f3ec-5164-adbc-bc416ceebe85",
@@ -63,7 +61,13 @@
       "position": [
         260,
         300
-      ]
+      ],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "REPLACE_WITH_YOUTUBE_CREDENTIAL_ID",
+          "name": "YouTube Data API key"
+        }
+      }
     },
     {
       "parameters": {
@@ -91,13 +95,11 @@
             {
               "name": "maxResults",
               "value": "25"
-            },
-            {
-              "name": "key",
-              "value": "={{ $vars.YOUTUBE_DATA_API_KEY }}"
             }
           ]
         },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
         "options": {}
       },
       "id": "5a741af4-6ebc-553d-86af-3440509b6135",
@@ -107,7 +109,13 @@
       "position": [
         520,
         300
-      ]
+      ],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "REPLACE_WITH_YOUTUBE_CREDENTIAL_ID",
+          "name": "YouTube Data API key"
+        }
+      }
     },
     {
       "parameters": {

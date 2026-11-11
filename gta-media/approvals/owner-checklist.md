@@ -44,8 +44,10 @@ Nothing on this list has been done. The code is ready to use each item once it e
 
 - [ ] Server, storage (with a public https path for Instagram), and the docker-compose stack running.
 - [ ] Import the ten workflows from `n8n/workflows/`, attach the "VicePulse worker" and "VicePulse Telegram"
-      credentials, set n8n variables `TELEGRAM_REVIEW_CHAT_ID`, `N8N_PUBLIC_URL`, `YOUTUBE_DATA_API_KEY`,
-      `ROCKSTAR_NEWSWIRE_FEED_URL`, then activate them one by one.
+      credentials (plus "YouTube Data API key", a Query Auth credential with parameter name `key`, for
+      workflows 07 and 08), replace the `REPLACE_WITH_TELEGRAM_REVIEW_CHAT_ID` and
+      `REPLACE_WITH_ROCKSTAR_NEWSWIRE_FEED_URL` placeholders in the nodes, then activate them one by one.
+      (The workflows avoid n8n Variables, which are a paid n8n feature.)
 - [ ] Run a week with `LLM_MODE=anthropic` and `VICEPULSE_ALLOW_LIVE_PUBLISH=0` to check Claude's picks and the
       cost (estimate in PLAN.md section 4).
 - [ ] Set `VICEPULSE_ALLOW_LIVE_PUBLISH=1` and enable one account at a time

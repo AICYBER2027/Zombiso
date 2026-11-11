@@ -64,8 +64,8 @@
     },
     {
       "parameters": {
-        "chatId": "={{ $vars.TELEGRAM_REVIEW_CHAT_ID }}",
-        "text": "=<b>Clip {{ $json.id }}</b> ({{ $json.channel }}, {{ $json.for_date }})\n{{ $json.hook }}\nFiles: {{ $json.files.join(', ') }}\nDecide here: {{ $vars.N8N_PUBLIC_URL }}/form/vicepulse-approve?clip={{ $json.id }}",
+        "chatId": "REPLACE_WITH_TELEGRAM_REVIEW_CHAT_ID",
+        "text": "=<b>Clip {{ $json.id }}</b> ({{ $json.channel }}, {{ $json.for_date }})\n{{ $json.hook }}\nFiles: {{ $json.files.join(', ') }}\nDecide here: http://127.0.0.1:5678/form/vicepulse-approve?clip={{ $json.id }}",
         "additionalFields": {
           "parse_mode": "HTML"
         }

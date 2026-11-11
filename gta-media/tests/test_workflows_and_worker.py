@@ -70,6 +70,7 @@ def test_workflow_structure(path):
             command = json.loads(body)["args"][0]
         assert command in COMMANDS, command
     text = path.read_text()
+    assert "$vars" not in text, "n8n Variables are a paid feature; use placeholders or credentials"
     assert not re.search(r"(sk-ant-|EAA[A-Za-z0-9]{20}|ya29\.)", text), "looks like a real secret"
 
 

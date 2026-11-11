@@ -51,7 +51,7 @@
     },
     {
       "parameters": {
-        "chatId": "={{ $vars.TELEGRAM_REVIEW_CHAT_ID }}",
+        "chatId": "REPLACE_WITH_TELEGRAM_REVIEW_CHAT_ID",
         "text": "=Daily run done. Waiting for approval: {{ $json.check.pending_approval.length }}, failed check: {{ $json.check.failed_check.length }}.",
         "additionalFields": {
           "parse_mode": "HTML"

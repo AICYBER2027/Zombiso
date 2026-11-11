@@ -23,7 +23,7 @@
     },
     {
       "parameters": {
-        "url": "={{ $vars.ROCKSTAR_NEWSWIRE_FEED_URL }}",
+        "url": "REPLACE_WITH_ROCKSTAR_NEWSWIRE_FEED_URL",
         "options": {}
       },
       "id": "3f1e2828-7a46-5582-929e-4fa45295a814",
@@ -61,13 +61,11 @@
             {
               "name": "maxResults",
               "value": "25"
-            },
-            {
-              "name": "key",
-              "value": "={{ $vars.YOUTUBE_DATA_API_KEY }}"
             }
           ]
         },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
         "options": {}
       },
       "id": "b6ed36b3-254f-5554-80f2-a70210af27c3",
@@ -77,7 +75,13 @@
       "position": [
         520,
         300
-      ]
+      ],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "REPLACE_WITH_YOUTUBE_CREDENTIAL_ID",
+          "name": "YouTube Data API key"
+        }
+      }
     },
     {
       "parameters": {
@@ -105,13 +109,11 @@
             {
               "name": "maxResults",
               "value": "25"
-            },
-            {
-              "name": "key",
-              "value": "={{ $vars.YOUTUBE_DATA_API_KEY }}"
             }
           ]
         },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
         "options": {}
       },
       "id": "58257141-c38f-506a-9e8c-3f48360cf5cd",
@@ -121,7 +123,13 @@
       "position": [
         780,
         300
-      ]
+      ],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "REPLACE_WITH_YOUTUBE_CREDENTIAL_ID",
+          "name": "YouTube Data API key"
+        }
+      }
     },
     {
       "parameters": {
@@ -265,7 +273,7 @@
   "pinData": {},
   "meta": {
     "templateCredsSetupCompleted": false,
-    "note": "Every 4 hours. Reads public feeds only; produces topics, never footage. The Rockstar feed URL and YouTube API key are placeholders to fill in."
+    "note": "Every 4 hours. Reads public feeds only; produces topics, never footage. Fill in the Rockstar feed URL placeholder and attach the YouTube Data API key credential."
   },
   "tags": [
     {

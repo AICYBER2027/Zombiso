@@ -80,7 +80,7 @@
     },
     {
       "parameters": {
-        "chatId": "={{ $vars.TELEGRAM_REVIEW_CHAT_ID }}",
+        "chatId": "REPLACE_WITH_TELEGRAM_REVIEW_CHAT_ID",
         "text": "=VicePulse health:\n{{ $json.alerts.join('\\n') }}",
         "additionalFields": {
           "parse_mode": "HTML"

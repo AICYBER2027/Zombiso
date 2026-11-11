@@ -74,7 +74,7 @@
     },
     {
       "parameters": {
-        "chatId": "={{ $vars.TELEGRAM_REVIEW_CHAT_ID }}",
+        "chatId": "REPLACE_WITH_TELEGRAM_REVIEW_CHAT_ID",
         "text": "=Takedown done. Removed via API: {{ $json.removed.length }}. Remove by hand: {{ $json.manual_removal_needed.map(m => m.platform + ' ' + m.channel + ' ' + (m.url || m.external_id)).join('; ') || 'none' }}",
         "additionalFields": {
           "parse_mode": "HTML"
