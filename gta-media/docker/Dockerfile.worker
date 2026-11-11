@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir .
 
 RUN useradd --create-home vicepulse && mkdir -p /data && chown vicepulse /data
 USER vicepulse
-ENV VICEPULSE_DATA_DIR=/data
+ENV VICEPULSE_DATA_DIR=/data \
+    VICEPULSE_HOME=/app
 EXPOSE 8088
 CMD ["vicepulse", "serve"]

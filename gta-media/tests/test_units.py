@@ -5,7 +5,7 @@ from datetime import date, datetime, timezone
 import pytest
 from PIL import Image
 
-from vicepulse import commentary, dedupe, publish, render, signals
+from vicepulse import commentary, db, dedupe, publish, render, signals
 from vicepulse.rights import check_grant
 
 TODAY = date(2026, 11, 10)
@@ -109,3 +109,9 @@ def test_slot_times_use_channel_timezone():
     cfg = {"timezone": "America/Sao_Paulo", "default_slots": ["10:00", "22:00"]}
     slots = publish.slot_times(cfg, date(2026, 11, 20))
     assert slots[0].utcoffset().total_seconds() == -3 * 3600 and slots[1].hour == 22
+
+
+def test_migrations_are_found_and_missing_ones_fail_loudly(tmp_path):
+    assert sorted(p.name for p in db.MIGRATIONS_DIR.glob("*.sql"))[0] == "001_initial.sql"
+    with pytest.raises(RuntimeError, match="no migration files"):
+        db.migrate(conn=None, migrations_dir=tmp_path)     # fails before touching the database

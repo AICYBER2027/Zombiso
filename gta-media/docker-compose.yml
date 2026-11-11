@@ -80,9 +80,20 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql://vicepulse:${POSTGRES_PASSWORD}@postgres:5432/vicepulse
+      # Container paths win over the Windows-style relative paths in .env.
+      VICEPULSE_HOME: /app
       VICEPULSE_DATA_DIR: /data
+      VICEPULSE_VOICE_DIR: /data/voice
+      VICEPULSE_CHANNELS_FILE: /app/config/channels.json
+      VICEPULSE_GAMES_FILE: /app/config/games.json
     volumes:
       - mediadata:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8088/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
       default:
         aliases: [worker]          # n8n workflows call http://worker:8088/run

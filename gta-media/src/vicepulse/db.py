@@ -21,12 +21,15 @@ def connect(settings: Settings) -> psycopg.Connection:
 
 
 def migrate(conn: psycopg.Connection, migrations_dir: Path = MIGRATIONS_DIR) -> list[str]:
+    files = sorted(Path(migrations_dir).glob("*.sql"))
+    if not files:
+        raise RuntimeError(f"no migration files found in {migrations_dir} (set VICEPULSE_HOME to the project folder)")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"
     )
     done = {r["name"] for r in conn.execute("SELECT name FROM schema_migrations").fetchall()}
     applied = []
-    for path in sorted(migrations_dir.glob("*.sql")):
+    for path in files:
         if path.name in done:
             continue
         conn.execute(path.read_text())

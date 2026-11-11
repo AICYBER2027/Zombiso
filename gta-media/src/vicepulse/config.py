@@ -7,7 +7,9 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[2]  # gta-media/
+# The project folder (holds db/, config/). From a source checkout it is two levels above this file;
+# in the Docker image the package is installed elsewhere, so the image sets VICEPULSE_HOME=/app.
+PACKAGE_ROOT = Path(os.environ.get("VICEPULSE_HOME") or Path(__file__).resolve().parents[2])
 PLATFORMS = ("youtube", "instagram", "tiktok")
 
 
