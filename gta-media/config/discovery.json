@@ -103,5 +103,6 @@
   ],
   "gta_focus_floor": 0.25,
   "other_language_factor": 0.25,
-  "_scoring": "total = 100 x weighted(audience, engagement, viral, live_now) x (gta_focus_floor + (1 - floor) x GTA share of recent content) x language factor"
+  "_scoring": "creator score = 100 x weighted(audience, engagement, viral, live_now) x GTA factor x language factor; GTA factor = floor + (1 - floor) x GTA share of recent content, floor rising from gta_focus_floor (1M followers or less) to star_focus_floor (50M+), because big audiences follow a star into GTA. 'vicepulse opportunities' ranks individual GTA lives and fresh uploads by reach.",
+  "star_focus_floor": 0.9
 }

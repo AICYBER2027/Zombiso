@@ -423,11 +423,13 @@ def _lang(code: str | None) -> str | None:
 
 def score_creator(channels: list[dict], content: list[dict], weights: dict, now: datetime | None = None, *,
                   target_languages: tuple[str, ...] = ("en", "pt"), gta_floor: float = 0.25,
-                  other_language_factor: float = 0.25) -> dict:
+                  star_floor: float = 0.9, other_language_factor: float = 0.25) -> dict:
     """Pure scoring; each part is 0..1 and the total is 0..100.
 
     total = 100 x weighted(audience, engagement, viral, live_now) x GTA factor x language factor
-      GTA factor      = gta_floor + (1 - gta_floor) x gta_focus   (a channel that made one GTA video ranks low)
+      GTA factor      = floor + (1 - floor) x gta_focus, where the floor rises from gta_floor (small channels)
+                        to star_floor (50M+ followers): a mid-size channel with one GTA video ranks low, a star
+                        who rarely plays GTA still ranks high because their audience follows them into the game
       language factor = 1 for the target languages or unknown, other_language_factor otherwise
     """
     now = now or _now()
@@ -437,17 +439,20 @@ def score_creator(channels: list[dict], content: list[dict], weights: dict, now:
     rates = [((c.get("likes") or 0) + (c.get("comments") or 0)) / c["views"]
              for c in recent if (c.get("views") or 0) >= 1000 and c.get("kind") in ("upload", "past_live")]
     engagement = _clamp((median(rates) if rates else 0) / 0.08)       # 8% likes+comments per view -> 1.0
-    velocities = []
+    per_day = []
     for c in recent:
         if c.get("kind") != "upload" or not c.get("views") or not c.get("published_at"):
             continue
         hours = (now - c["published_at"]).total_seconds() / 3600
         if 1 <= hours <= 24 * 7:
-            velocities.append(c["views"] / hours * 24 / max(followers, 1))  # views per day per follower
-    # Log scale: 1% of followers per day -> 0.15, 10% -> 0.52, 100% (views/day = followers) -> 1.0.
-    # A linear scale saturated during the GTA 6 pre-launch hype (almost every channel scored 1.0).
-    ratio = median(sorted(velocities)[-3:]) if velocities else 0.0      # median of the 3 fastest, not one outlier
-    viral = _clamp(math.log10(1 + ratio / 0.01) / math.log10(101))
+            per_day.append(c["views"] / hours * 24)
+    velocities = [v / max(followers, 1) for v in per_day]                # views per day per follower
+    # Relative growth, log scale: 1% of followers per day -> 0.15, 10% -> 0.52, 100% -> 1.0 (a linear scale
+    # saturated during the GTA 6 pre-launch hype). Absolute reach, log scale: 10M views per day -> 1.0, so a
+    # star whose huge audience makes relative growth look small still counts as viral. Median of the 3 fastest.
+    ratio = median(sorted(velocities)[-3:]) if velocities else 0.0
+    daily = median(sorted(per_day)[-3:]) if per_day else 0.0
+    viral = max(_clamp(math.log10(1 + ratio / 0.01) / math.log10(101)), _clamp(math.log10(daily + 1) / 7))
     weights_game = {"gta6": 1.0, "gta5": 0.5}
     gta_focus = (sum(weights_game.get(c.get("game"), 0) for c in recent) / len(recent)) if recent else 0.0
     live = [c for c in content if c.get("kind") == "live" and (c.get("game") in weights_game)]
@@ -460,12 +465,17 @@ def score_creator(channels: list[dict], content: list[dict], weights: dict, now:
     base_parts = {"audience": audience, "engagement": engagement, "viral": viral, "live_now": live_now}
     wsum = sum(weights.get(k, 0) for k in base_parts) or 1e-9
     base = sum(weights.get(k, 0) * v for k, v in base_parts.items()) / wsum
-    gta_factor = gta_floor + (1 - gta_floor) * gta_focus
+    # Audiences follow the creator, not the game: when a 60M-subscriber star plays GTA, that audience watches
+    # it. So the bigger the audience, the less GTA focus matters ("star power": 0 at 1M followers, 1 at 50M+).
+    star = _clamp((math.log10(followers + 1) - 6) / math.log10(50))
+    floor = gta_floor + (star_floor - gta_floor) * star
+    gta_factor = floor + (1 - floor) * gta_focus
     total = 100 * base * gta_factor * language_fit
     return {**{k: round(v, 4) for k, v in {**base_parts, "gta_focus": gta_focus}.items()}, "total": round(total, 2),
             "detail": {"followers": followers, "recent_items": len(recent), "engagement_samples": len(rates),
-                       "velocity_samples": len(velocities), "velocity_ratio": round(ratio, 4),
-                       "dominant_language": dominant, "language_fit": language_fit, "gta_factor": round(gta_factor, 3)}}
+                       "velocity_samples": len(velocities), "velocity_ratio": round(ratio, 4), "views_per_day": round(daily),
+                       "dominant_language": dominant, "language_fit": language_fit, "gta_factor": round(gta_factor, 3),
+                       "star_power": round(star, 3)}}
 
 
 def rank(conn, cfg: dict) -> list[dict]:
@@ -478,7 +488,7 @@ def rank(conn, cfg: dict) -> list[dict]:
                                (cr["id"],)).fetchall()
         s = score_creator(chans, content, weights,
                           target_languages=tuple(cfg.get("target_languages", ["en", "pt"])),
-                          gta_floor=cfg.get("gta_focus_floor", 0.25),
+                          gta_floor=cfg.get("gta_focus_floor", 0.25), star_floor=cfg.get("star_focus_floor", 0.9),
                           other_language_factor=cfg.get("other_language_factor", 0.25))
         conn.execute("""INSERT INTO creator_scores (creator_id, audience, engagement, viral, gta_focus, live_now, total, detail)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
@@ -555,6 +565,52 @@ def review_creator(conn, creator_id: int, *, decision: str, by: str, evidence_ur
     db.log_event(conn, "creator_review", "creator", creator_id, status, {"by": by, "notes": notes})
     conn.commit()
     return {"creator_id": creator_id, "status": status}
+
+
+def score_opportunity(item: dict, followers: int, now: datetime | None = None) -> float:
+    """0..100: how much a single GTA livestream or upload is worth clipping right now.
+
+    Reach is what is actually happening (live viewers, or views per day for an upload), plus the creator's
+    audience, because a star's GTA moment spreads far beyond the people watching it live.
+    """
+    now = now or _now()
+    if item.get("game") not in ("gta6", "gta5"):
+        return 0.0
+    if item.get("kind") == "live":
+        reach, fresh = (item.get("live_viewers") or 0) * 20, 1.0            # ~20 views later per live viewer
+    else:
+        start = item.get("published_at") or item.get("actual_start")
+        if not start:
+            return 0.0
+        hours = max((now - start).total_seconds() / 3600, 1.0)
+        reach = (item.get("views") or 0) / hours * 24
+        fresh = _clamp(1 - (hours - 6) / 66)                                # full for 6 h, gone after 72 h
+    reach_part = _clamp(math.log10(reach + 1) / 7)                          # 10M expected views -> 1.0
+    audience_part = _clamp(math.log10(followers + 1) / 8)
+    game = 1.0 if item.get("game") == "gta6" else 0.7
+    return round(100 * (0.6 * reach_part + 0.4 * audience_part) * game * fresh, 2)
+
+
+def opportunities(conn, limit: int = 30) -> list[dict]:
+    """GTA livestreams happening now and fresh GTA uploads, best first, with the creator's permission status."""
+    rows = conn.execute(
+        """SELECT ct.*, cc.platform AS ch_platform, cc.handle, cc.followers, cr.id AS creator_id, cr.display_name,
+                  cr.permission_status, cr.rights_id
+           FROM creator_content ct JOIN creator_channels cc ON cc.id = ct.channel_id JOIN creators cr ON cr.id = cc.creator_id
+           WHERE ct.game IN ('gta6', 'gta5')
+             AND (ct.kind = 'live' OR (ct.kind IN ('upload', 'past_live')
+                  AND COALESCE(ct.published_at, ct.actual_start) > now() - interval '72 hours'))""").fetchall()
+    out = []
+    for r in rows:
+        score = score_opportunity(r, r["followers"] or 0)
+        if score <= 0:
+            continue
+        out.append({"score": score, "creator": r["display_name"], "creator_id": r["creator_id"],
+                    "kind": r["kind"], "game": r["game"], "title": r["title"], "url": r["url"],
+                    "live_viewers": r["live_viewers"], "views": r["views"], "followers": r["followers"],
+                    "permission": r["permission_status"],
+                    "usable": r["permission_status"] == "authorized" and r["rights_id"] is not None})
+    return sorted(out, key=lambda o: -o["score"])[:limit]
 
 
 def creator_report(conn, limit: int = 50) -> list[dict]:

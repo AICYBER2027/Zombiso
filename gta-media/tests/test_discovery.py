@@ -191,7 +191,7 @@ def test_score_fixes_from_first_real_run():
     # 1. viral no longer saturates: faster growth relative to followers still ranks higher
     slow = discovery.score_creator([{"followers": 1_000_000}], [_upload(150_000, 24)], w)     # 15%/day
     fast = discovery.score_creator([{"followers": 1_000_000}], [_upload(1_500_000, 24)], w)   # 150%/day
-    assert 0.4 < slow["viral"] < 0.7 and fast["viral"] == 1.0
+    assert slow["viral"] < 0.8 and fast["viral"] == 1.0 and slow["viral"] < fast["viral"]
     # 2. a big non-GTA channel with one GTA 6 video ranks below a smaller GTA-focused one
     tech = discovery.score_creator([{"followers": 4_000_000}],
                                    [_upload(900_000, 20)] + [_upload(800_000, 30 + i, game="other") for i in range(8)], w)
@@ -359,3 +359,34 @@ def test_cli_without_keys_skips_cleanly(settings, conn, monkeypatch, capsys):
     assert out["discover"] == {"skipped": True} and any("YOUTUBE_DATA_API_KEY" in n for n in out["notes"])
     assert run("creators")["creators"] == []
     assert cli.main(["creator-review", "--creator", "999", "--decision", "deny", "--by", "x"]) == 1
+
+
+def test_stars_rank_high_even_when_gta_is_a_small_part_of_their_content():
+    """Owner feedback (2026-11-11): audiences follow the creator. When IShowSpeed plays GTA, his audience watches."""
+    w = CFG["score_weights"]
+    kw = dict(gta_floor=CFG["gta_focus_floor"], star_floor=CFG["star_focus_floor"])
+    star = discovery.score_creator([{"followers": 62_000_000}],
+                                   [_upload(8_000_000, 20)] + [_upload(6_000_000, 30 + i * 12, game="other") for i in range(9)], w, **kw)
+    gta_500k = discovery.score_creator([{"followers": 500_000}], [_upload(150_000, 20 + i * 10) for i in range(8)], w, **kw)
+    tech_4m = discovery.score_creator([{"followers": 4_000_000}],
+                                      [_upload(900_000, 20)] + [_upload(800_000, 30 + i * 10, game="other") for i in range(8)], w, **kw)
+    assert star["gta_focus"] == 0.1 and star["detail"]["star_power"] == 1.0
+    assert star["total"] > gta_500k["total"] > tech_4m["total"]
+    assert star["viral"] > 0.9                                   # 9.6M views/day counts even on a 62M channel
+
+
+def test_opportunities_rank_live_star_gta_moments_first(conn):
+    yt, tw = clients(conn)
+    cfg = {**CFG, "seeds": [s for s in CFG["seeds"] if s["display_name"] == "IShowSpeed"]}
+    discovery.discover(conn, cfg, yt, tw)
+    discovery.monitor(conn, cfg, yt, tw)
+    discovery.check_permissions(conn)
+    ops = discovery.opportunities(conn)
+    assert ops[0]["creator"] == "IShowSpeed" and ops[0]["kind"] == "live" and ops[0]["game"] == "gta6"
+    assert all(o["game"] in ("gta6", "gta5") for o in ops)          # FIFA upload is not an opportunity
+    assert all(o["usable"] is False for o in ops)                    # nobody is authorized yet
+    assert [o["score"] for o in ops] == sorted((o["score"] for o in ops), reverse=True)
+    assert discovery.score_opportunity({"kind": "live", "game": "gta6", "live_viewers": 200_000}, 62_000_000) > \
+        discovery.score_opportunity({"kind": "live", "game": "gta6", "live_viewers": 8_000}, 500_000)
+    assert discovery.score_opportunity({"kind": "upload", "game": "gta6", "views": 10**6,
+                                        "published_at": NOW - timedelta(hours=80)}, 10**6) == 0   # too old

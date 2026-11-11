@@ -180,6 +180,10 @@ def cmd_creators(a, s, conn):
     return {"creators": discovery.creator_report(conn, a.limit)}
 
 
+def cmd_opportunities(a, s, conn):
+    return {"opportunities": discovery.opportunities(conn, a.limit)}
+
+
 def cmd_creator_review(a, s, conn):
     return discovery.review_creator(
         conn, a.creator, decision=a.decision, by=a.by, evidence_url=a.evidence_url, notes=a.notes,
@@ -258,6 +262,8 @@ def build_parser() -> argparse.ArgumentParser:
     add("permissions", cmd_permissions, "scan creators' public text for clipping / reupload statements")
     sp = add("creators", cmd_creators, "list ranked creators with their permission status")
     sp.add_argument("--limit", type=int, default=50)
+    sp = add("opportunities", cmd_opportunities, "GTA livestreams now and fresh GTA uploads, ranked by reach")
+    sp.add_argument("--limit", type=int, default=30)
     sp = add("creator-review", cmd_creator_review, "a person's permission decision for a creator")
     sp.add_argument("--creator", type=int, required=True)
     sp.add_argument("--decision", required=True, choices=["authorize", "deny", "needs_info"])

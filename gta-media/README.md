@@ -104,8 +104,12 @@ watches GTA creators through official APIs only, the YouTube Data API v3 (API ke
   Twitch's GTA categories. Channels under `min_followers` (or `min_live_viewers` on Twitch) are skipped.
 - **Monitor:** new uploads, scheduled livestreams, live streams (viewer counts, peaks) and ended streams for
   every tracked channel, with snapshots for view velocity.
-- **Rank:** 0–100 from audience size, engagement, viral velocity, GTA focus and live viewers; weights are in
-  `config/discovery.json`.
+- **Rank (who to watch):** 0–100 from audience size, engagement, viral reach (relative growth or absolute
+  views per day, whichever is higher) and live viewers, times a GTA factor and a language factor. Big stars
+  keep most of their score even when GTA is a small part of their channel, because their audience follows
+  them into the game; mid-size channels with one GTA video drop. Weights are in `config/discovery.json`.
+- **Opportunities (what to clip now):** `vicepulse opportunities` ranks individual GTA livestreams happening
+  now and GTA uploads from the last 72 hours by reach, with each creator's permission status.
 - **Permissions:** scans channel and video descriptions for what the creator says about clipping
   (allowed, refused, clipping programme, conditions such as credit) and stores the quotes with links.
 - **Nothing becomes usable automatically.** Every creator stays `unknown`, `needs_review`, `stated_allow`,
