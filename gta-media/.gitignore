@@ -8,3 +8,4 @@ __pycache__/
 *.mkv
 *.wav
 *.m4a
+e2e-output/

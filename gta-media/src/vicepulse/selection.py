@@ -50,7 +50,8 @@ def select_for_channel(conn, settings: Settings, llm: LLM, channel_key: str, for
     channel_cfg = settings.channel(channel_key)
     ch = conn.execute("SELECT * FROM channels WHERE key = %s", (channel_key,)).fetchone()
     have = conn.execute(
-        "SELECT count(*) AS n FROM clips WHERE channel_id = %s AND for_date = %s AND status <> 'duplicate'",
+        """SELECT count(*) AS n FROM clips WHERE channel_id = %s AND for_date = %s
+           AND status NOT IN ('duplicate', 'rejected', 'failed_check', 'blocked', 'taken_down')""",
         (ch["id"], for_date)).fetchone()["n"]
     need = max(0, ch["clips_per_day"] - have)
     if need == 0:
