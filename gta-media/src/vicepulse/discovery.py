@@ -417,8 +417,19 @@ def _clamp(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
-def score_creator(channels: list[dict], content: list[dict], weights: dict, now: datetime | None = None) -> dict:
-    """Pure scoring. Each part is 0..1; total is 0..100."""
+def _lang(code: str | None) -> str | None:
+    return code.split("-")[0].lower() if code else None
+
+
+def score_creator(channels: list[dict], content: list[dict], weights: dict, now: datetime | None = None, *,
+                  target_languages: tuple[str, ...] = ("en", "pt"), gta_floor: float = 0.25,
+                  other_language_factor: float = 0.25) -> dict:
+    """Pure scoring; each part is 0..1 and the total is 0..100.
+
+    total = 100 x weighted(audience, engagement, viral, live_now) x GTA factor x language factor
+      GTA factor      = gta_floor + (1 - gta_floor) x gta_focus   (a channel that made one GTA video ranks low)
+      language factor = 1 for the target languages or unknown, other_language_factor otherwise
+    """
     now = now or _now()
     followers = max([c.get("followers") or 0 for c in channels] or [0])
     audience = _clamp(math.log10(followers + 1) / 8)                   # 100M followers -> 1.0
@@ -433,16 +444,28 @@ def score_creator(channels: list[dict], content: list[dict], weights: dict, now:
         hours = (now - c["published_at"]).total_seconds() / 3600
         if 1 <= hours <= 24 * 7:
             velocities.append(c["views"] / hours * 24 / max(followers, 1))  # views per day per follower
-    viral = _clamp((max(velocities) if velocities else 0) / 0.2)       # 20% of followers per day -> 1.0
+    # Log scale: 1% of followers per day -> 0.15, 10% -> 0.52, 100% (views/day = followers) -> 1.0.
+    # A linear scale saturated during the GTA 6 pre-launch hype (almost every channel scored 1.0).
+    ratio = median(sorted(velocities)[-3:]) if velocities else 0.0      # median of the 3 fastest, not one outlier
+    viral = _clamp(math.log10(1 + ratio / 0.01) / math.log10(101))
     weights_game = {"gta6": 1.0, "gta5": 0.5}
     gta_focus = (sum(weights_game.get(c.get("game"), 0) for c in recent) / len(recent)) if recent else 0.0
     live = [c for c in content if c.get("kind") == "live" and (c.get("game") in weights_game)]
     live_now = _clamp(math.log10(max([c.get("live_viewers") or 0 for c in live] or [0]) + 1) / 5)
-    parts = {"audience": audience, "engagement": engagement, "viral": viral, "gta_focus": gta_focus, "live_now": live_now}
-    total = 100 * sum(weights.get(k, 0) * v for k, v in parts.items()) / max(sum(weights.values()), 1e-9)
-    return {**{k: round(v, 4) for k, v in parts.items()}, "total": round(total, 2),
+    langs = [_lang(c.get("language")) for c in recent if c.get("language")]
+    dominant = max(set(langs), key=langs.count) if langs else None
+    if dominant is None:
+        dominant = next((_lang(c.get("language")) for c in channels if c.get("language")), None)
+    language_fit = 1.0 if dominant is None or dominant in target_languages else other_language_factor
+    base_parts = {"audience": audience, "engagement": engagement, "viral": viral, "live_now": live_now}
+    wsum = sum(weights.get(k, 0) for k in base_parts) or 1e-9
+    base = sum(weights.get(k, 0) * v for k, v in base_parts.items()) / wsum
+    gta_factor = gta_floor + (1 - gta_floor) * gta_focus
+    total = 100 * base * gta_factor * language_fit
+    return {**{k: round(v, 4) for k, v in {**base_parts, "gta_focus": gta_focus}.items()}, "total": round(total, 2),
             "detail": {"followers": followers, "recent_items": len(recent), "engagement_samples": len(rates),
-                       "velocity_samples": len(velocities)}}
+                       "velocity_samples": len(velocities), "velocity_ratio": round(ratio, 4),
+                       "dominant_language": dominant, "language_fit": language_fit, "gta_factor": round(gta_factor, 3)}}
 
 
 def rank(conn, cfg: dict) -> list[dict]:
@@ -453,7 +476,10 @@ def rank(conn, cfg: dict) -> list[dict]:
         content = conn.execute("""SELECT ct.* FROM creator_content ct JOIN creator_channels cc ON cc.id = ct.channel_id
                                   WHERE cc.creator_id = %s AND ct.last_seen_at > now() - interval '21 days'""",
                                (cr["id"],)).fetchall()
-        s = score_creator(chans, content, weights)
+        s = score_creator(chans, content, weights,
+                          target_languages=tuple(cfg.get("target_languages", ["en", "pt"])),
+                          gta_floor=cfg.get("gta_focus_floor", 0.25),
+                          other_language_factor=cfg.get("other_language_factor", 0.25))
         conn.execute("""INSERT INTO creator_scores (creator_id, audience, engagement, viral, gta_focus, live_now, total, detail)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                      (cr["id"], s["audience"], s["engagement"], s["viral"], s["gta_focus"], s["live_now"], s["total"],
@@ -535,6 +561,8 @@ def creator_report(conn, limit: int = 50) -> list[dict]:
     return conn.execute(
         """SELECT cr.id, cr.display_name, cr.permission_status, cr.permission_summary, cr.rights_id,
                   s.total AS score, s.audience, s.engagement, s.viral, s.gta_focus, s.live_now,
+                  s.detail->>'dominant_language' AS language, (s.detail->>'gta_factor')::float AS gta_factor,
+                  (s.detail->>'language_fit')::float AS language_fit,
                   (SELECT json_agg(json_build_object('platform', cc.platform, 'handle', cc.handle, 'followers', cc.followers,
                                                      'url', cc.url)) FROM creator_channels cc WHERE cc.creator_id = cr.id) AS channels,
                   (SELECT count(*) FROM creator_content ct JOIN creator_channels cc ON cc.id = ct.channel_id

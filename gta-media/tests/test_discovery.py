@@ -180,6 +180,30 @@ def test_score_rewards_viral_gta_live_creators():
     assert discovery.score_creator([], [], w)["total"] == 0
 
 
+def _upload(views, hours, game="gta6", language="en", followers_likes=0.05):
+    return {"kind": "upload", "game": game, "language": language, "views": views,
+            "likes": int(views * followers_likes), "comments": int(views * 0.005), "published_at": NOW - timedelta(hours=hours)}
+
+
+def test_score_fixes_from_first_real_run():
+    """The first real discovery run (2026-11-11) showed three problems; these pin the fixes."""
+    w = CFG["score_weights"]
+    # 1. viral no longer saturates: faster growth relative to followers still ranks higher
+    slow = discovery.score_creator([{"followers": 1_000_000}], [_upload(150_000, 24)], w)     # 15%/day
+    fast = discovery.score_creator([{"followers": 1_000_000}], [_upload(1_500_000, 24)], w)   # 150%/day
+    assert 0.4 < slow["viral"] < 0.7 and fast["viral"] == 1.0
+    # 2. a big non-GTA channel with one GTA 6 video ranks below a smaller GTA-focused one
+    tech = discovery.score_creator([{"followers": 4_000_000}],
+                                   [_upload(900_000, 20)] + [_upload(800_000, 30 + i, game="other") for i in range(8)], w)
+    gta = discovery.score_creator([{"followers": 300_000}], [_upload(250_000, 20 + i) for i in range(6)], w)
+    assert gta["gta_focus"] == 1.0 and tech["gta_focus"] < 0.2 and gta["total"] > tech["total"]
+    # 3. off-target languages are down-weighted; Brazilian Portuguese is a target language
+    es = discovery.score_creator([{"followers": 300_000}], [_upload(250_000, 20 + i, language="es-419") for i in range(6)], w)
+    br = discovery.score_creator([{"followers": 300_000}], [_upload(250_000, 20 + i, language="pt-BR") for i in range(6)], w)
+    assert es["detail"]["dominant_language"] == "es" and es["detail"]["language_fit"] == 0.25
+    assert br["detail"]["language_fit"] == 1.0 and abs(es["total"] - br["total"] * 0.25) < 0.05
+
+
 # ------------------------------------------------------------------ clients
 
 def test_youtube_client_quota_and_params():
