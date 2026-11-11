@@ -23,6 +23,19 @@
     },
     {
       "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "57a6f54c-ad09-5114-b80b-02e6991bf109",
+      "name": "Run from command line",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        260,
+        300
+      ]
+    },
+    {
+      "parameters": {
         "method": "POST",
         "url": "http://worker:8088/run",
         "authentication": "genericCredentialType",
@@ -39,7 +52,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        260,
+        520,
         300
       ],
       "credentials": {
@@ -74,7 +87,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        520,
+        780,
         300
       ]
     },
@@ -91,7 +104,7 @@
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
       "position": [
-        780,
+        1040,
         300
       ],
       "credentials": {
@@ -106,6 +119,17 @@
     }
   ],
   "connections": {
+    "Run from command line": {
+      "main": [
+        [
+          {
+            "node": "Health check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "Hourly": {
       "main": [
         [

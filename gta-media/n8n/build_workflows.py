@@ -284,7 +284,10 @@ return [{ json: { args: ['prospects-add', '--json', JSON.stringify(out)] } }];""
 
     f = Flow(10, "Health check and alerts", "Hourly: failed or blocked posts, expiring licences, short days, waiting approvals.")
     t = f.cron("Hourly", "5 * * * *")
+    # Lets `n8n execute --id <id>` run this workflow from a terminal (a schedule trigger cannot start a CLI run).
+    cli = f.node("Run from command line", "n8n-nodes-base.executeWorkflowTrigger", 1.1, {"inputSource": "passthrough"})
     w = f.worker("Health check", ["health"])
+    f.link(cli, w)
     c = f.if_("Any alerts?", "={{ $json.healthy }}", "false")
     a = f.telegram("Alert", "=VicePulse health:\n{{ $json.alerts.join('\\n') }}")
     f.chain(t, w, c)
