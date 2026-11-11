@@ -86,11 +86,12 @@ class Flow:
         return self.node(name, "n8n-nodes-base.code", 2, {"jsCode": js})
 
     def export(self) -> dict:
+        # No "tags": n8n's importer creates a shared tag once per file and the second file then
+        # fails on the unique tag name, which rolls back the whole import.
         return {"name": f"VicePulse {self.number:02d} - {self.name}", "nodes": self.nodes,
                 "connections": self.connections, "active": False,
                 "settings": {"executionOrder": "v1", "timezone": "UTC", "saveManualExecutions": True},
-                "pinData": {}, "meta": {"templateCredsSetupCompleted": False, "note": self.note},
-                "tags": [{"name": "vicepulse"}]}
+                "pinData": {}, "meta": {"templateCredsSetupCompleted": False, "note": self.note}}
 
 
 def build() -> list[Flow]:

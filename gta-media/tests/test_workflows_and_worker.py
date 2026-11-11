@@ -42,6 +42,7 @@ def test_workflow_structure(path):
     names = [n["name"] for n in wf["nodes"]]
     assert len(names) == len(set(names))
     assert wf["active"] is False                                   # nothing switches itself on after import
+    assert "tags" not in wf                                        # shared tags break a multi-file n8n import
     triggers = [n for n in wf["nodes"] if n["type"].endswith(("Trigger", "webhook", "formTrigger"))]
     assert triggers, "every workflow needs a trigger"
     for src, outs in wf["connections"].items():

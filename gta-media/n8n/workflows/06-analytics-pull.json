@@ -73,10 +73,5 @@
   "meta": {
     "templateCredsSetupCompleted": false,
     "note": "Nightly metrics for everything published in the last 30 days."
-  },
-  "tags": [
-    {
-      "name": "vicepulse"
-    }
-  ]
+  }
 }

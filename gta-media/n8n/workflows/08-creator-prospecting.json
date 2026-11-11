@@ -244,10 +244,5 @@
   "meta": {
     "templateCredsSetupCompleted": false,
     "note": "Weekly. Finds GTA creators to contact for a written licence. It stores names and channel ids only; it never downloads anyone's videos."
-  },
-  "tags": [
-    {
-      "name": "vicepulse"
-    }
-  ]
+  }
 }

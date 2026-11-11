@@ -186,10 +186,5 @@
   "meta": {
     "templateCredsSetupCompleted": false,
     "note": "Every 15 minutes: schedule approved clips, then post what is due. Dry run unless VICEPULSE_ALLOW_LIVE_PUBLISH=1 and the account row is enabled."
-  },
-  "tags": [
-    {
-      "name": "vicepulse"
-    }
-  ]
+  }
 }

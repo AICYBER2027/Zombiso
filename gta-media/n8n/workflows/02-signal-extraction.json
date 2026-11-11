@@ -73,10 +73,5 @@
   "meta": {
     "templateCredsSetupCompleted": false,
     "note": "Queue worker: analyses every cleared source. Heavy work runs on the worker container."
-  },
-  "tags": [
-    {
-      "name": "vicepulse"
-    }
-  ]
+  }
 }

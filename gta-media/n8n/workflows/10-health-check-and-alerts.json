@@ -147,10 +147,5 @@
   "meta": {
     "templateCredsSetupCompleted": false,
     "note": "Hourly: failed or blocked posts, expiring licences, short days, waiting approvals."
-  },
-  "tags": [
-    {
-      "name": "vicepulse"
-    }
-  ]
+  }
 }

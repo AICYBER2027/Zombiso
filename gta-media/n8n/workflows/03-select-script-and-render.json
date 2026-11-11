@@ -107,10 +107,5 @@
   "meta": {
     "templateCredsSetupCompleted": false,
     "note": "Daily run for VicePulse EN and VicePulse BR (5 clips each)."
-  },
-  "tags": [
-    {
-      "name": "vicepulse"
-    }
-  ]
+  }
 }

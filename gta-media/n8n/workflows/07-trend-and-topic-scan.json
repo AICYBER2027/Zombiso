@@ -274,10 +274,5 @@
   "meta": {
     "templateCredsSetupCompleted": false,
     "note": "Every 4 hours. Reads public feeds only; produces topics, never footage. Fill in the Rockstar feed URL placeholder and attach the YouTube Data API key credential."
-  },
-  "tags": [
-    {
-      "name": "vicepulse"
-    }
-  ]
+  }
 }

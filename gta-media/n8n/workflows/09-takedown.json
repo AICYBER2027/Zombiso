@@ -130,10 +130,5 @@
   "meta": {
     "templateCredsSetupCompleted": false,
     "note": "Manual trigger. Removes a clip (or everything from a source) everywhere the API allows and lists the posts a person must delete by hand (Instagram and TikTok have no delete API)."
-  },
-  "tags": [
-    {
-      "name": "vicepulse"
-    }
-  ]
+  }
 }

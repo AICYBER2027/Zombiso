@@ -151,10 +151,5 @@
   "meta": {
     "templateCredsSetupCompleted": false,
     "note": "Called by the storage sync (or the creator upload form) for each new file."
-  },
-  "tags": [
-    {
-      "name": "vicepulse"
-    }
-  ]
+  }
 }

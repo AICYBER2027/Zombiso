@@ -305,10 +305,5 @@
   "meta": {
     "templateCredsSetupCompleted": false,
     "note": "Sends each clip to the reviewer; the reviewer decides in an n8n form. TikTok requires the person to choose privacy and interaction settings for every post, with no defaults."
-  },
-  "tags": [
-    {
-      "name": "vicepulse"
-    }
-  ]
+  }
 }
