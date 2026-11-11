@@ -597,10 +597,18 @@ def score_opportunity(item: dict, followers: int, now: datetime | None = None) -
     return round(100 * (0.7 * reach_part + 0.3 * audience_part) * game * fresh, 2)
 
 
-def opportunities(conn, limit: int = 30, per_creator: int = 2) -> list[dict]:
-    """GTA livestreams happening now and fresh GTA uploads, best first, at most ``per_creator`` per creator."""
+def opportunities(conn, limit: int = 30, per_creator: int = 2, cfg: dict | None = None) -> list[dict]:
+    """GTA livestreams happening now and fresh GTA uploads, best first, at most ``per_creator`` per creator.
+
+    Content outside the target languages (en, pt) is weighted like in the creator ranking
+    (other_language_factor), using the item's own language, else the channel's.
+    """
+    cfg = cfg or load_config()
+    targets = tuple(cfg.get("target_languages", ["en", "pt"]))
+    other = cfg.get("other_language_factor", 0.25)
     rows = conn.execute(
-        """SELECT ct.*, cc.platform AS ch_platform, cc.handle, cc.followers, cr.id AS creator_id, cr.display_name,
+        """SELECT ct.*, cc.platform AS ch_platform, cc.handle, cc.followers, cc.language AS channel_language,
+                  cr.id AS creator_id, cr.display_name,
                   cr.permission_status, cr.rights_id
            FROM creator_content ct JOIN creator_channels cc ON cc.id = ct.channel_id JOIN creators cr ON cr.id = cc.creator_id
            WHERE ct.game IN ('gta6', 'gta5')
@@ -609,6 +617,9 @@ def opportunities(conn, limit: int = 30, per_creator: int = 2) -> list[dict]:
     scored = []
     for r in rows:
         score = score_opportunity(r, r["followers"] or 0)
+        lang = _lang(r["language"]) or _lang(r["channel_language"])
+        if lang and lang not in targets:
+            score = round(score * other, 2)
         if score > 0:
             scored.append((score, r))
     out, per = [], {}
@@ -619,6 +630,7 @@ def opportunities(conn, limit: int = 30, per_creator: int = 2) -> list[dict]:
         out.append({"score": score, "creator": r["display_name"], "creator_id": r["creator_id"],
                     "kind": r["kind"], "game": r["game"], "title": r["title"], "url": r["url"],
                     "live_viewers": r["live_viewers"], "views": r["views"], "followers": r["followers"],
+                    "language": _lang(r["language"]) or _lang(r["channel_language"]),
                     "published_at": r["published_at"], "permission": r["permission_status"],
                     "usable": r["permission_status"] == "authorized" and r["rights_id"] is not None})
         if len(out) >= limit:

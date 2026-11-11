@@ -414,3 +414,18 @@ def test_opportunities_are_capped_per_creator(conn):
     ops = discovery.opportunities(conn)
     assert sum(1 for o in ops if o["creator"] == "GTA Brasil Clips") == 2
     assert sum(1 for o in discovery.opportunities(conn, per_creator=10) if o["creator"] == "GTA Brasil Clips") == 6
+
+
+def test_opportunities_downweight_other_languages(conn):
+    """Real run 2026-11-11: Spanish-language GTA uploads appeared in the opportunities list."""
+    yt, tw = clients(conn)
+    discovery.discover(conn, {**CFG, "seeds": []}, yt, tw)
+    cid = conn.execute("SELECT id FROM creator_channels WHERE handle = '@gtabrasil'").fetchone()["id"]
+    for ext, lang in (("es1", "es-419"), ("pt1", "pt-BR")):
+        discovery.upsert_content(conn, cid, "youtube", {"external_id": ext, "kind": "upload", "game": "gta6", "language": lang,
+                                                       "views": 500_000, "published_at": NOW - timedelta(hours=5)})
+    conn.commit()
+    ops = [o for o in discovery.opportunities(conn, per_creator=10) if o["views"] == 500_000]
+    es = next(o for o in ops if o["language"] == "es")
+    pt = next(o for o in ops if o["language"] == "pt")
+    assert abs(es["score"] - pt["score"] * CFG["other_language_factor"]) < 0.05 and es["score"] < pt["score"]
