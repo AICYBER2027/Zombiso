@@ -236,34 +236,21 @@ return [{ json: { args: ['topics-add', '--json', JSON.stringify(out)] } }];""".s
     f.chain(merge, to_topics, store)
     flows.append(f)
 
-    f = Flow(8, "Creator prospecting", "Weekly. Finds GTA creators to contact for a written licence. It stores names "
-                                       "and channel ids only; it never downloads anyone's videos.")
-    t = f.cron("Mondays 09:00 UTC", "0 9 * * 1")
-    searches = []
-    for lang, q in (("en", "GTA 6 gameplay"), ("pt", "GTA 6 gameplay português")):
-        searches.append(f.node(f"YouTube channel search ({lang})", "n8n-nodes-base.httpRequest", 4.2, {
-            "method": "GET", "url": "https://www.googleapis.com/youtube/v3/search", "sendQuery": True,
-            "queryParameters": {"parameters": [
-                {"name": "part", "value": "snippet"}, {"name": "type", "value": "channel"},
-                {"name": "q", "value": q}, {"name": "relevanceLanguage", "value": lang},
-                {"name": "maxResults", "value": "25"}]},
-            "authentication": "genericCredentialType", "genericAuthType": "httpQueryAuth",
-            "options": {}}, creds=YOUTUBE_CRED))
-    merge = f.node("Merge", "n8n-nodes-base.merge", 3, {"numberInputs": 2})
-    to_p = f.code("To prospects", """
-const out = [];
-for (const item of $input.all()) {
-  for (const r of (item.json.items || [])) {
-    out.push({ platform: 'youtube', channel_ref: r.snippet.channelId, display_name: r.snippet.channelTitle,
-               language: /portugu/i.test(r.snippet.description || '') ? 'pt-BR' : 'en' });
-  }
-}
-return [{ json: { args: ['prospects-add', '--json', JSON.stringify(out)] } }];""".strip())
-    store = f.worker("Store prospects", expr="$json.args")
-    for i, n in enumerate(searches):
-        f.link(t, n)
-        f.connections.setdefault(n, {"main": [[]]})["main"][0].append({"node": merge, "type": "main", "index": i})
-    f.chain(merge, to_p, store)
+    f = Flow(8, "Creator discovery and monitoring",
+             "Finds GTA creators on YouTube and Twitch through their official APIs, watches uploads, scheduled "
+             "and live streams, ranks them and records what they say about clipping. Read-only: it never "
+             "downloads footage and never grants permission; a person approves each creator with "
+             "'vicepulse creator-review'. Keys live in the worker's .env (YOUTUBE_DATA_API_KEY, TWITCH_CLIENT_ID, "
+             "TWITCH_CLIENT_SECRET); without them the steps report 'skipped'.")
+    t1 = f.cron("Every 6 hours", "10 */6 * * *")
+    d = f.worker("Discover creators", ["discover"])
+    p1 = f.worker("Check clipping permissions", ["permissions"])
+    r1 = f.worker("Rank creators", ["rank"])
+    f.chain(t1, d, p1, r1)
+    t2 = f.cron("Every 20 minutes", "*/20 * * * *")
+    m = f.worker("Monitor uploads and live streams", ["monitor"])
+    r2 = f.worker("Re-rank creators", ["rank"])
+    f.chain(t2, m, r2)
     flows.append(f)
 
     f = Flow(9, "Takedown", "Manual trigger. Removes a clip (or everything from a source) everywhere the API allows "

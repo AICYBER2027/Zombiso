@@ -30,6 +30,16 @@ Nothing on this list has been done. The code is ready to use each item once it e
 - [ ] Anthropic API key with a spend limit set in the Console, once you approve paid calls.
 - [ ] Telegram bot + review chat for alerts and approvals.
 
+## Creator discovery
+
+- [ ] YouTube Data API key (same Google Cloud project as uploads; restrict the key to YouTube Data API v3) and
+      a Twitch application (client id + secret). Put them in `.env`; rebuild/restart the worker.
+- [ ] Review creators in `vicepulse creators`. For each creator you want to clip, get documented permission
+      (a signed licence, the creator's written OK, or their published clipping-programme terms), save it
+      somewhere with an https link, then run `vicepulse creator-review ... --decision authorize`.
+- [ ] Arrange how each authorized creator's footage reaches you as files. Downloading from YouTube or
+      Twitch is not allowed by their terms, and VicePulse has no downloader.
+
 ## Recording
 
 - [ ] Console (PS5 or Xbox Series X/S for GTA 6) and capture card. Record GTA 5 now for testing.

@@ -94,6 +94,32 @@ vicepulse health
 `vicepulse --help` lists every command. The n8n stack (`docker compose up`) is described at the top of
 `docker-compose.yml`; it has not been run as a deployment.
 
+## Creator discovery (Priority 1)
+
+`vicepulse discovery-run` (n8n workflow 08: discover every 6 hours, monitor every 20 minutes) finds and
+watches GTA creators through official APIs only, the YouTube Data API v3 (API key) and Twitch Helix (app token):
+
+- **Discover:** resolves the seed creators in `config/discovery.json` (IShowSpeed and others), searches
+  YouTube for GTA 6 videos, live and upcoming streams in English and Portuguese, and lists who is live in
+  Twitch's GTA categories. Channels under `min_followers` (or `min_live_viewers` on Twitch) are skipped.
+- **Monitor:** new uploads, scheduled livestreams, live streams (viewer counts, peaks) and ended streams for
+  every tracked channel, with snapshots for view velocity.
+- **Rank:** 0–100 from audience size, engagement, viral velocity, GTA focus and live viewers; weights are in
+  `config/discovery.json`.
+- **Permissions:** scans channel and video descriptions for what the creator says about clipping
+  (allowed, refused, clipping programme, conditions such as credit) and stores the quotes with links.
+- **Nothing becomes usable automatically.** Every creator stays `unknown`, `needs_review`, `stated_allow`,
+  `stated_deny` or `program_available` until a person runs
+  `vicepulse creator-review --creator <id> --decision authorize --by <name> --evidence-url https://... --edits-allowed`.
+  That writes a verified `creator_permission` rights entry with the evidence link; the rights gates require it
+  before any of that creator's footage can be ingested, rendered or published.
+- **No footage is downloaded from YouTube or Twitch.** Their terms do not allow it. An authorized creator's
+  footage must be supplied as files (their own upload, or a source their permission explicitly names), then
+  ingested as `--origin creator_upload --rights-id <id>`.
+
+`vicepulse creators` lists the ranking with permission status and evidence summaries. Without
+`YOUTUBE_DATA_API_KEY` / `TWITCH_CLIENT_ID` + `TWITCH_CLIENT_SECRET` the commands report "skipped".
+
 ## What the tests prove
 
 `python -m pytest`, last run on 10 November 2026: **59 passed** in about 4 minutes.

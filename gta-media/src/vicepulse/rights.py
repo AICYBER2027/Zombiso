@@ -46,7 +46,7 @@ def check_grant(row: dict | None, *, on: date | None = None, platform: str | Non
             reasons.append("Creative Commons NoDerivatives licence does not allow edits")
         if monetised and "NC" in cc.split("-"):
             reasons.append("Creative Commons NonCommercial licence does not allow monetised use")
-    if row["licence_type"] == "written_licence" and not row.get("derivative_edits_allowed"):
+    if row["licence_type"] in ("written_licence", "creator_permission") and not row.get("derivative_edits_allowed"):
         reasons.append("licence does not allow edited derivative clips")
     if row["starts_on"] > on:
         reasons.append(f"licence starts {row['starts_on']}")

@@ -1,0 +1,253 @@
+{
+  "name": "VicePulse 08 - Creator discovery and monitoring",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "10 */6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "76d9ccdb-3cb5-50a2-a977-dbd0235f758c",
+      "name": "Every 6 hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://worker:8088/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"args\": [\"discover\"]}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "b0d76150-a14e-5067-ac8e-e64b1acba09b",
+      "name": "Discover creators",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://worker:8088/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"args\": [\"permissions\"]}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "be47d5c7-f5ad-5571-bfec-9a0fe9b04bea",
+      "name": "Check clipping permissions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://worker:8088/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"args\": [\"rank\"]}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "846ed7b6-56d3-559f-8252-98ed8820af0c",
+      "name": "Rank creators",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        780,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/20 * * * *"
+            }
+          ]
+        }
+      },
+      "id": "849ae9cb-aae4-5ade-bc2c-55451b7349cb",
+      "name": "Every 20 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        1040,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://worker:8088/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"args\": [\"monitor\"]}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "fe543523-1ced-545a-81c1-6b0e8d8411ae",
+      "name": "Monitor uploads and live streams",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1300,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://worker:8088/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"args\": [\"rank\"]}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "d8f492c6-25ee-5d6a-aff9-188a2fa6ab30",
+      "name": "Re-rank creators",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WORKER_CREDENTIAL_ID",
+          "name": "VicePulse worker"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 6 hours": {
+      "main": [
+        [
+          {
+            "node": "Discover creators",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Discover creators": {
+      "main": [
+        [
+          {
+            "node": "Check clipping permissions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check clipping permissions": {
+      "main": [
+        [
+          {
+            "node": "Rank creators",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every 20 minutes": {
+      "main": [
+        [
+          {
+            "node": "Monitor uploads and live streams",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Monitor uploads and live streams": {
+      "main": [
+        [
+          {
+            "node": "Re-rank creators",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "note": "Finds GTA creators on YouTube and Twitch through their official APIs, watches uploads, scheduled and live streams, ranks them and records what they say about clipping. Read-only: it never downloads footage and never grants permission; a person approves each creator with 'vicepulse creator-review'. Keys live in the worker's .env (YOUTUBE_DATA_API_KEY, TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET); without them the steps report 'skipped'."
+  }
+}

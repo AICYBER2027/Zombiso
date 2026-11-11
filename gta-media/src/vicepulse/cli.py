@@ -12,7 +12,7 @@ import json
 import sys
 from datetime import date, datetime, timezone
 
-from . import commentary, db, ingest, policy, publish, render, selection, signals
+from . import commentary, db, discovery, ingest, policy, publish, render, selection, signals
 from .config import Settings
 from .llm import make_llm
 
@@ -152,6 +152,48 @@ def cmd_prospects_add(a, s, conn):
     return {"prospects": n}
 
 
+def _disc(conn):
+    cfg = discovery.load_config()
+    yt, tw, notes = discovery.make_clients(conn, cfg)
+    return cfg, yt, tw, notes
+
+
+def cmd_discover(a, s, conn):
+    cfg, yt, tw, notes = _disc(conn)
+    return {"notes": notes, **(discovery.discover(conn, cfg, yt, tw) if (yt or tw) else {"skipped": True})}
+
+
+def cmd_monitor(a, s, conn):
+    cfg, yt, tw, notes = _disc(conn)
+    return {"notes": notes, **(discovery.monitor(conn, cfg, yt, tw) if (yt or tw) else {"skipped": True})}
+
+
+def cmd_rank(a, s, conn):
+    return {"ranking": discovery.rank(conn, discovery.load_config())}
+
+
+def cmd_permissions(a, s, conn):
+    return {"creators": discovery.check_permissions(conn)}
+
+
+def cmd_creators(a, s, conn):
+    return {"creators": discovery.creator_report(conn, a.limit)}
+
+
+def cmd_creator_review(a, s, conn):
+    return discovery.review_creator(
+        conn, a.creator, decision=a.decision, by=a.by, evidence_url=a.evidence_url, notes=a.notes,
+        platforms=a.platforms.split(",") if a.platforms else None,
+        languages=a.languages.split(",") if a.languages else None,
+        monetisation_allowed=a.monetisation_allowed, edits_allowed=a.edits_allowed, expires_on=a.expires_on,
+        credit_text=a.credit_text)
+
+
+def cmd_discovery_run(a, s, conn):
+    cfg, yt, tw, notes = _disc(conn)
+    return discovery.run_all(conn, cfg, yt, tw, notes)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="vicepulse", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
@@ -210,6 +252,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", required=True)
     sp = add("prospects-add", cmd_prospects_add, "store creator prospects")
     sp.add_argument("--json", required=True)
+    add("discover", cmd_discover, "find GTA creators on YouTube and Twitch (official APIs, read-only)")
+    add("monitor", cmd_monitor, "refresh tracked creators: new uploads, scheduled and live streams")
+    add("rank", cmd_rank, "score creators by audience, engagement, viral potential, GTA focus and live status")
+    add("permissions", cmd_permissions, "scan creators' public text for clipping / reupload statements")
+    sp = add("creators", cmd_creators, "list ranked creators with their permission status")
+    sp.add_argument("--limit", type=int, default=50)
+    sp = add("creator-review", cmd_creator_review, "a person's permission decision for a creator")
+    sp.add_argument("--creator", type=int, required=True)
+    sp.add_argument("--decision", required=True, choices=["authorize", "deny", "needs_info"])
+    sp.add_argument("--by", required=True)
+    sp.add_argument("--evidence-url", help="https link to the saved licence / written permission / archived policy")
+    sp.add_argument("--notes")
+    sp.add_argument("--platforms", help="comma list, default youtube,instagram,tiktok")
+    sp.add_argument("--languages", help="comma list, default all")
+    sp.add_argument("--monetisation-allowed", action="store_true")
+    sp.add_argument("--edits-allowed", action="store_true")
+    sp.add_argument("--expires-on")
+    sp.add_argument("--credit-text")
+    add("discovery-run", cmd_discovery_run, "discover + monitor + permissions + rank (scheduled job)")
     sp = add("serve", None, "run the worker HTTP API that n8n calls")
     return p
 

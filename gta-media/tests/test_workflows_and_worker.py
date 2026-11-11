@@ -23,7 +23,7 @@ def test_ten_workflows_match_plan():
     assert len(WORKFLOWS) == 10
     names = [json.loads(p.read_text())["name"] for p in WORKFLOWS]
     for expected in ("Ingest and rights gate", "Signal extraction", "Select, script and render", "Approval queue",
-                     "Publisher", "Analytics pull", "Trend and topic scan", "Creator prospecting", "Takedown",
+                     "Publisher", "Analytics pull", "Trend and topic scan", "Creator discovery and monitoring", "Takedown",
                      "Health check and alerts"):
         assert any(expected in n for n in names), expected
 

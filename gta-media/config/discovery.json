@@ -1,0 +1,30 @@
+{
+  "_note": "Creator discovery settings. Seeds are starting points only; discovery adds creators it finds. Being listed here grants nothing: every creator starts with permission_status 'unknown'.",
+  "seeds": [
+    {"display_name": "IShowSpeed", "language": "en", "youtube_handle": "@IShowSpeed"},
+    {"display_name": "Kai Cenat", "language": "en", "twitch_login": "kaicenat"},
+    {"display_name": "xQc", "language": "en", "twitch_login": "xqc"},
+    {"display_name": "summit1g", "language": "en", "twitch_login": "summit1g"},
+    {"display_name": "Gaules", "language": "pt-BR", "twitch_login": "gaules"},
+    {"display_name": "Casimiro", "language": "pt-BR", "twitch_login": "casimito"}
+  ],
+  "games": {
+    "gta6": {"patterns": ["gta ?6", "gta ?vi\\b", "grand theft auto ?vi\\b", "grand theft auto 6"],
+             "twitch_category": "Grand Theft Auto VI"},
+    "gta5": {"patterns": ["gta ?5", "gta ?v\\b", "grand theft auto ?v\\b", "gta ?online", "gta ?rp\\b"],
+             "twitch_category": "Grand Theft Auto V"}
+  },
+  "youtube_searches": [
+    {"q": "GTA 6", "regionCode": "US", "relevanceLanguage": "en"},
+    {"q": "GTA 6", "regionCode": "BR", "relevanceLanguage": "pt"},
+    {"q": "GTA 6 live", "eventType": "live", "regionCode": "US", "relevanceLanguage": "en"},
+    {"q": "GTA 6 ao vivo", "eventType": "live", "regionCode": "BR", "relevanceLanguage": "pt"},
+    {"q": "GTA 6 livestream", "eventType": "upcoming", "regionCode": "US", "relevanceLanguage": "en"}
+  ],
+  "twitch_languages": ["en", "pt"],
+  "min_followers": 50000,
+  "min_live_viewers": 500,
+  "max_new_creators_per_run": 25,
+  "youtube_daily_quota_budget": 8000,
+  "score_weights": {"audience": 0.2, "engagement": 0.15, "viral": 0.25, "gta_focus": 0.2, "live_now": 0.2}
+}
