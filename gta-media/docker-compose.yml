@@ -6,7 +6,7 @@
 #                docker compose run --rm vicepulse vicepulse migrate
 # n8n editor:    http://localhost:5678  (bound to localhost only)
 #
-# Image tags are pinned to major versions; check them before first use.
+# n8n is pinned to an exact version; Postgres and Redis to major versions.
 
 x-n8n-env: &n8n-env
   DB_TYPE: postgresdb
@@ -21,6 +21,7 @@ x-n8n-env: &n8n-env
   N8N_RUNNERS_ENABLED: "true"
   OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS: "true"
   GENERIC_TIMEZONE: UTC
+  N8N_LISTEN_ADDRESS: 0.0.0.0           # IPv4; some Docker hosts have no IPv6 and n8n fails on '::'
   N8N_DIAGNOSTICS_ENABLED: "false"
   N8N_PERSONALIZATION_ENABLED: "false"
 
@@ -51,7 +52,7 @@ services:
       retries: 5
 
   n8n:
-    image: docker.n8n.io/n8nio/n8n:latest   # pin to a tested version before real use
+    image: docker.n8n.io/n8nio/n8n:2.47.3   # started and health-checked locally on 2026-11-11
     restart: unless-stopped
     environment: *n8n-env
     ports:
@@ -64,7 +65,7 @@ services:
       redis: {condition: service_healthy}
 
   n8n-worker:
-    image: docker.n8n.io/n8nio/n8n:latest
+    image: docker.n8n.io/n8nio/n8n:2.47.3
     restart: unless-stopped
     command: worker
     environment: *n8n-env

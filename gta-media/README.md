@@ -121,7 +121,9 @@ vicepulse health
   current docs contradict PLAN.md about private-only uploads for unaudited projects; see
   `approvals/youtube-api-compliance-audit.md`.
 - **Whisper:** behind an interface, optional; not installed or tested here (`VICEPULSE_TRANSCRIBER=none`).
-- **docker-compose:** validated with `docker compose config`, never started. n8n image tag is `latest`; pin it.
+- **docker-compose:** Postgres, Redis, n8n 2.47.3 and the n8n queue worker were started and health-checked in a
+  throwaway dev container on 11 November 2026 (not a deployment). The VicePulse worker image has not been built yet.
+  n8n warns that Postgres 16 gets only compatibility support and recommends 17.
 - **n8n workflows:** structure tested; never imported into a running n8n.
 
 ## Not built yet
