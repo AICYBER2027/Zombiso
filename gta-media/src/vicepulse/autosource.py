@@ -214,11 +214,12 @@ def highlight(conn, settings: Settings, llm: LLM, path: str | Path, *, rights: s
                              rights_id=rid)
     if res["status"] != "cleared":
         return {"source_id": res["source_id"], "clips": [], "finished_files": [], "refused": res.get("reasons")}
+    why: list = []
     ids = _clip_and_render(conn, settings, llm, res["source_id"], channels=[channel], clip_seconds=clip_seconds,
-                           max_clips=1)
+                           max_clips=1, why=why, ignore_day_limit=True)
     clips = conn.execute("SELECT id, status, status_reason, in_s, out_s, script FROM clips WHERE id = ANY(%s)",
                          (ids,)).fetchall()
-    return {"source_id": res["source_id"], "clips": ids, "already_done": False,
+    return {"source_id": res["source_id"], "clips": ids, "already_done": False, "why_no_clip": why,
             "details": [{"clip": c["id"], "status": c["status"], "reason": c["status_reason"],
                          "from_s": c["in_s"], "to_s": c["out_s"],
                          "subtitles": (c["script"] or {}).get("caption_source"),
@@ -229,14 +230,18 @@ def highlight(conn, settings: Settings, llm: LLM, path: str | Path, *, rights: s
 # ---------------------------------------------------------------- the automatic run
 
 def _clip_and_render(conn, settings: Settings, llm: LLM, source_id: int, *, channels: list[str], clip_seconds: float,
-                     max_clips: int) -> list[int]:
+                     max_clips: int, why: list | None = None, ignore_day_limit: bool = False) -> list[int]:
     duration = conn.execute("SELECT duration_s FROM sources WHERE id = %s", (source_id,)).fetchone()["duration_s"] or 0
-    signals.extract(conn, settings, source_id, window_s=min(clip_seconds, max(duration, 1)))
-    selection.triage_new(conn, settings, llm)
+    sig = signals.extract(conn, settings, source_id, window_s=min(clip_seconds, max(duration, 1)))
+    tri = selection.triage_new(conn, settings, llm)
     clip_ids = []
     for ch in channels:
-        clip_ids += selection.select_for_channel(conn, settings, llm, ch, date.today(), max_clips=max_clips,
-                                                 source_id=source_id)["selected"]
+        sel = selection.select_for_channel(conn, settings, llm, ch, date.today(), max_clips=max_clips,
+                                           source_id=source_id, ignore_day_limit=ignore_day_limit)
+        clip_ids += sel["selected"]
+        if why is not None and not sel["selected"]:
+            why.append({"channel": ch, "candidates": sig["candidates"], "triage": tri, "note": sel.get("note"),
+                        "filtered": sel.get("filtered", []), "duplicates": sel.get("duplicates", [])})
     if clip_ids:
         commentary.write_scripts(conn, settings, llm, clip_ids=clip_ids)
         render.render_pending(conn, settings, clip_ids=clip_ids)

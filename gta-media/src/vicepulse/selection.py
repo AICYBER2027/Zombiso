@@ -47,14 +47,16 @@ def _examples(conn, channel_id: int) -> list[dict]:
 
 
 def select_for_channel(conn, settings: Settings, llm: LLM, channel_key: str, for_date: date,
-                       max_clips: int | None = None, source_id: int | None = None) -> dict:
+                       max_clips: int | None = None, source_id: int | None = None,
+                       ignore_day_limit: bool = False) -> dict:
     channel_cfg = settings.channel(channel_key)
     ch = conn.execute("SELECT * FROM channels WHERE key = %s", (channel_key,)).fetchone()
     have = conn.execute(
         """SELECT count(*) AS n FROM clips WHERE channel_id = %s AND for_date = %s
            AND status NOT IN ('duplicate', 'rejected', 'failed_check', 'blocked', 'taken_down')""",
         (ch["id"], for_date)).fetchone()["n"]
-    need = max(0, ch["clips_per_day"] - have)
+    # A highlight the owner asks for by hand is made even when the day's automatic slots are taken.
+    need = max_clips or 1 if ignore_day_limit else max(0, ch["clips_per_day"] - have)
     if max_clips is not None:
         need = min(need, max(0, max_clips))
     if need == 0:

@@ -120,6 +120,11 @@ $result = ($raw | Select-Object -Last 1) | ConvertFrom-Json
 
 if ($result.refused) { Stop-With "The rights gate refused the file: $($result.refused -join '; ')" }
 if (-not $result.finished_files -or $result.finished_files.Count -eq 0) {
+    foreach ($w in $result.why_no_clip) {
+        foreach ($f in $w.filtered) { Write-Host ("  Skipped as a duplicate: " + ($f.reasons -join "; ")) -ForegroundColor Yellow }
+        if ($w.candidates -eq 0) { Write-Host "  No usable moments were found in this video." -ForegroundColor Yellow }
+        if ($w.triage.blocked -gt 0) { Write-Host "  Some moments were blocked by the content rules." -ForegroundColor Yellow }
+    }
     Write-Host ($raw -join "`n")
     Stop-With "No clip was produced (details above). Send this output to Claude."
 }

@@ -85,13 +85,13 @@ def test_transcript_mode_never_falls_back_to_invented_text(settings):
     assert src == "script"                                              # auto mode: script captions as before
 
 
-def speech_video(path, tmp_path):
+def speech_video(path, tmp_path, visual="testsrc2=size=640x360:rate=30"):
     wav = tmp_path / "speech.wav"
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"flite=text='{SPOKEN}':voice=slt",
                     "-ar", "16000", str(wav)], check=True, capture_output=True)
     d = media.probe(wav)["duration"]
     total = round(d + 8, 1)
-    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-t", str(total), "-i", "testsrc2=size=640x360:rate=30",
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-t", str(total), "-i", visual,
                     "-i", str(wav), "-filter_complex", "[1:a]adelay=4000:all=1,apad[a]", "-map", "0:v", "-map", "[a]",
                     "-t", str(total), "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(path)],
                    check=True, capture_output=True)
@@ -149,3 +149,20 @@ def test_highlight_command_one_file(settings, conn, footage, monkeypatch, capsys
     assert cli.main(["highlight", "--file", str(footage), "--rights", "own"]) == 0
     again = json.loads(capsys.readouterr().out)
     assert again["already_done"] and again["clips"] == out["clips"]
+
+
+def test_highlight_explains_a_duplicate_and_ignores_the_daily_cap(settings, conn, footage, tmp_path, monkeypatch, capsys):
+    from conftest import make_footage
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    rid = verified_rights(conn)
+    cli.main(["ingest", "--file", str(footage), "--origin", "own_recording", "--rights-id", str(rid)])
+    cli.main(["signals"])
+    cli.main(["daily", "--channel", "en"])                                # fills today's automatic slots
+    capsys.readouterr()
+    same_look = make_footage(tmp_path / "reencoded.mp4", crf=30)          # same visuals, different file
+    out = json.loads(capsys.readouterr().out or "{}") if cli.main(
+        ["highlight", "--file", str(same_look), "--rights", "own", "--clip-seconds", "20"]) == 0 else None
+    assert out and out["clips"] == []
+    [why] = out["why_no_clip"]
+    assert why["note"] != "day already full"                             # a requested highlight is not capped
+    assert any("same visuals" in r for f in why["filtered"] for r in f["reasons"])
