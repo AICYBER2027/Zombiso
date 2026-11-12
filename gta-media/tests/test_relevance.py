@@ -91,3 +91,21 @@ def test_live_now_lists_only_gta_streams(conn):
     m = discovery.monitor(conn, cfg, yt, tw)
     assert m["live_now"] and all(x["game"] in ("gta6", "gta5") for x in m["live_now"])
     assert not any(x["display_name"] == "Kai Cenat" for x in m["live_now"])        # streaming WoW, not GTA
+
+
+def test_twitch_only_discovery_spends_no_youtube_quota(conn, settings, monkeypatch, capsys):
+    import json as _json
+    from vicepulse import cli
+    fake_yt = FakeYouTube()
+    yt, tw = clients(conn, fake_yt=fake_yt)
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(discovery, "make_clients", lambda conn, cfg: (yt, tw, []))
+    assert cli.main(["discover", "--only", "twitch"]) == 0
+    out = _json.loads(capsys.readouterr().out)
+    assert out["added"]["youtube"] == 0 and out["added"]["twitch"] >= 1 and out["searches_run"] == []
+    assert cli.main(["monitor", "--only", "twitch"]) == 0
+    capsys.readouterr()
+    assert fake_yt.calls == []                                        # not a single YouTube request
+    live = conn.execute("""SELECT cc.language, ct.game FROM creator_content ct JOIN creator_channels cc ON cc.id = ct.channel_id
+                           WHERE ct.platform = 'twitch' AND ct.kind = 'live'""").fetchall()
+    assert {r["language"] for r in live} <= {"en", "pt-BR"} and live

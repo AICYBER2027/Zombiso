@@ -158,13 +158,21 @@ def _disc(conn):
     return cfg, yt, tw, notes
 
 
+def _only(a, yt, tw):
+    """--only youtube / --only twitch: use one platform, e.g. to test Twitch without spending YouTube quota."""
+    only = getattr(a, "only", None)
+    return (yt if only in (None, "youtube") else None), (tw if only in (None, "twitch") else None)
+
+
 def cmd_discover(a, s, conn):
     cfg, yt, tw, notes = _disc(conn)
+    yt, tw = _only(a, yt, tw)
     return {"notes": notes, **(discovery.discover(conn, cfg, yt, tw) if (yt or tw) else {"skipped": True})}
 
 
 def cmd_monitor(a, s, conn):
     cfg, yt, tw, notes = _disc(conn)
+    yt, tw = _only(a, yt, tw)
     return {"notes": notes, **(discovery.monitor(conn, cfg, yt, tw) if (yt or tw) else {"skipped": True})}
 
 
@@ -267,8 +275,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", required=True)
     sp = add("prospects-add", cmd_prospects_add, "store creator prospects")
     sp.add_argument("--json", required=True)
-    add("discover", cmd_discover, "find GTA creators on YouTube and Twitch (official APIs, read-only)")
-    add("monitor", cmd_monitor, "refresh tracked creators: new uploads, scheduled and live streams")
+    sp = add("discover", cmd_discover, "find GTA creators on YouTube and Twitch (official APIs, read-only)")
+    sp.add_argument("--only", choices=["youtube", "twitch"])
+    sp = add("monitor", cmd_monitor, "refresh tracked creators: new uploads, scheduled and live streams")
+    sp.add_argument("--only", choices=["youtube", "twitch"])
     add("rank", cmd_rank, "score creators by audience, engagement, viral potential, GTA focus and live status")
     add("permissions", cmd_permissions, "scan creators' public text for clipping / reupload statements")
     sp = add("creators", cmd_creators, "list ranked creators with their permission status")
