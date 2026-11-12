@@ -76,6 +76,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.worker
+      args:
+        WHISPER: ${VICEPULSE_BUILD_WHISPER:-0}     # 1 = include local Whisper for real subtitles
     restart: unless-stopped
     env_file: .env
     environment:

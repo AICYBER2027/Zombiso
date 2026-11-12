@@ -26,7 +26,7 @@ from pathlib import Path
 
 import requests
 
-from . import commentary, db, ingest, policy, render, selection, signals
+from . import commentary, db, ingest, media, policy, render, selection, signals
 from .config import Settings
 from .llm import LLM
 
@@ -151,6 +151,79 @@ def own_folder_rights(conn) -> int:
                    'owner declaration (VICEPULSE_OWN_FOLDER_DECLARED)', now(),
                    'The owner declared that every file placed in the own recordings folder is their own recording.')
            RETURNING id""", (["youtube", "instagram", "tiktok"],)).fetchone()["id"]
+
+
+def rights_for_file(conn, kind: str, *, licence: str = "", author: str = "", url: str = "", creator: str = "") -> int:
+    """Rights for one file the owner points at, from their single answer about where it came from.
+
+    own: the owner's own recording. cc: a Creative Commons licence that allows commercial use and edits
+    (licence name, author and licence page URL). permission: written permission from the creator to clip,
+    edit and monetise (creator name and a link to the evidence). The owner's answer is the confirmation.
+    """
+    platforms = ["youtube", "instagram", "tiktok"]
+    by = "owner (highlight command)"
+    if kind == "own":
+        return conn.execute(
+            """INSERT INTO rights_ledger (owner_name, licence_type, platforms, starts_on, monetisation_allowed,
+                   derivative_edits_allowed, verified_by, verified_at, notes)
+               VALUES ('VicePulse (own recording)', 'own', %s, CURRENT_DATE, TRUE, TRUE, %s, now(),
+                       'The owner stated this file is their own recording.') RETURNING id""",
+            (platforms, by)).fetchone()["id"]
+    if kind == "cc":
+        lic = classify_licence(licence)
+        if not lic:
+            raise ValueError(f"licence {licence!r} cannot be used: it must allow commercial use and edits "
+                             "(CC BY, CC0 or public domain; not NC, ND or SA)")
+        if not (author and url):
+            raise ValueError("a Creative Commons file needs --author and --url (the licence or file page)")
+        return conn.execute(
+            """INSERT INTO rights_ledger (owner_name, licence_type, cc_licence, platforms, languages, starts_on,
+                   monetisation_allowed, derivative_edits_allowed, credit_text, document_url, verified_by, verified_at, notes)
+               VALUES (%s, 'creative_commons', %s, %s, ARRAY['*'], CURRENT_DATE, TRUE, TRUE, %s, %s, %s, now(),
+                       'Licence stated by the owner.') RETURNING id""",
+            (author, lic["cc_licence"], platforms, f"Video: {author} ({licence})", url, by)).fetchone()["id"]
+    if kind == "permission":
+        if not (creator and url):
+            raise ValueError("creator permission needs --creator and --url (a link to the written permission)")
+        return conn.execute(
+            """INSERT INTO rights_ledger (owner_name, licence_type, platforms, languages, starts_on,
+                   monetisation_allowed, derivative_edits_allowed, credit_text, document_url, verified_by, verified_at, notes)
+               VALUES (%s, 'creator_permission', %s, ARRAY['*'], CURRENT_DATE, TRUE, TRUE, %s, %s, %s, now(),
+                       'The owner stated the creator gave written permission to clip, edit and monetise.') RETURNING id""",
+            (creator, platforms, f"Video: {creator}", url, by)).fetchone()["id"]
+    raise ValueError("rights must be own, cc or permission")
+
+
+def highlight(conn, settings: Settings, llm: LLM, path: str | Path, *, rights: str, channel: str = "en",
+              clip_seconds: float = 45, licence: str = "", author: str = "", url: str = "", creator: str = "") -> dict:
+    """One highlight from one file: rights, ingest, best window, subtitles, vertical render, saved MP4."""
+    path = Path(path)
+    digest = media.sha256_file(path)
+    known = conn.execute("SELECT id FROM sources WHERE file_sha256 = %s", (digest,)).fetchone()
+    if known:
+        done = conn.execute("""SELECT cl.id FROM clips cl JOIN candidates c ON c.id = cl.candidate_id
+                               JOIN channels ch ON ch.id = cl.channel_id JOIN renders r ON r.clip_id = cl.id
+                               WHERE c.source_id = %s AND ch.key = %s AND r.platform = 'youtube'
+                               ORDER BY cl.id DESC LIMIT 1""", (known["id"], channel)).fetchone()
+        if done:
+            return {"source_id": known["id"], "clips": [done["id"]], "already_done": True,
+                    "finished_files": _export(conn, settings, [done["id"]], _safe_name(path.stem))}
+    rid = rights_for_file(conn, rights, licence=licence, author=author, url=url, creator=creator)
+    conn.commit()
+    res = ingest.ingest_file(conn, settings, path, origin="own_recording" if rights == "own" else "creator_upload",
+                             rights_id=rid)
+    if res["status"] != "cleared":
+        return {"source_id": res["source_id"], "clips": [], "finished_files": [], "refused": res.get("reasons")}
+    ids = _clip_and_render(conn, settings, llm, res["source_id"], channels=[channel], clip_seconds=clip_seconds,
+                           max_clips=1)
+    clips = conn.execute("SELECT id, status, status_reason, in_s, out_s, script FROM clips WHERE id = ANY(%s)",
+                         (ids,)).fetchall()
+    return {"source_id": res["source_id"], "clips": ids, "already_done": False,
+            "details": [{"clip": c["id"], "status": c["status"], "reason": c["status_reason"],
+                         "from_s": c["in_s"], "to_s": c["out_s"],
+                         "subtitles": (c["script"] or {}).get("caption_source"),
+                         "subtitle_lines": len((c["script"] or {}).get("captions", []))} for c in clips],
+            "finished_files": _export(conn, settings, ids, _safe_name(path.stem))}
 
 
 # ---------------------------------------------------------------- the automatic run

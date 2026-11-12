@@ -7,8 +7,9 @@
 
 from __future__ import annotations
 
+import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -58,37 +59,67 @@ class Segment:
     start: float
     end: float
     text: str
+    words: list = field(default_factory=list)       # [{"start": s, "end": s, "text": "word"}]
 
 
 class Transcriber(Protocol):
-    def transcribe(self, path: str | Path) -> list[Segment]: ...
+    def transcribe(self, path: str | Path, start: float | None = None, duration: float | None = None) -> list[Segment]: ...
 
 
 class NullTranscriber:
     """No transcription. Selection still works from scenes, loudness and frames."""
 
-    def transcribe(self, path: str | Path) -> list[Segment]:
+    def transcribe(self, path: str | Path, start: float | None = None, duration: float | None = None) -> list[Segment]:
         return []
 
 
-class WhisperTranscriber:
-    """Local Whisper via faster-whisper (optional dependency: pip install .[whisper])."""
+def decode_audio_16k(path: str | Path, start: float | None = None, duration: float | None = None):
+    """Mono 16 kHz float32 samples via FFmpeg (avoids depending on PyAV versions)."""
+    import numpy as np
 
-    def __init__(self, model: str = "small"):
+    args = ["ffmpeg", "-nostdin", "-v", "error"]
+    if start:
+        args += ["-ss", f"{start:.3f}"]
+    args += ["-i", str(path)]
+    if duration:
+        args += ["-t", f"{duration:.3f}"]
+    args += ["-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]
+    pcm = media.run_bytes(args)
+    return np.frombuffer(pcm, np.int16).astype(np.float32) / 32768.0
+
+
+class WhisperTranscriber:
+    """Local Whisper via faster-whisper (optional: pip install .[whisper]). Free; runs on the CPU.
+
+    Times returned are relative to ``start`` when a range is given (i.e. relative to the clip).
+    """
+
+    def __init__(self, model: str = "base", cache_dir: str | None = None):
         try:
             from faster_whisper import WhisperModel  # type: ignore
         except ImportError as e:  # pragma: no cover - optional
-            raise RuntimeError("faster-whisper is not installed; set VICEPULSE_TRANSCRIBER=none or pip install .[whisper]") from e
-        self._model = WhisperModel(model, device="auto", compute_type="int8")
+            raise RuntimeError("faster-whisper is not installed; rebuild the worker with VICEPULSE_BUILD_WHISPER=1 "
+                               "or set VICEPULSE_TRANSCRIBER=none") from e
+        self._model = WhisperModel(model, device="cpu", compute_type="int8", download_root=cache_dir)
+        self.language: str | None = None
 
-    def transcribe(self, path: str | Path) -> list[Segment]:  # pragma: no cover - needs model weights
-        segments, _ = self._model.transcribe(str(path), vad_filter=True)
-        return [Segment(s.start, s.end, s.text.strip()) for s in segments]
+    def transcribe(self, path: str | Path, start: float | None = None, duration: float | None = None) -> list[Segment]:
+        audio = decode_audio_16k(path, start, duration)
+        if audio.size < 1600:                       # under 0.1 s of audio, or no audio track
+            return []
+        segments, info = self._model.transcribe(audio, word_timestamps=True, vad_filter=True)
+        self.language = info.language
+        out = []
+        for seg in segments:
+            words = [{"start": float(w.start), "end": float(w.end), "text": w.word.strip()}
+                     for w in (seg.words or []) if w.word.strip()]
+            out.append(Segment(float(seg.start), float(seg.end), seg.text.strip(), words))
+        return out
 
 
 def make_transcriber(settings: Settings) -> Transcriber:
     if settings.transcriber == "whisper":
-        return WhisperTranscriber(settings.whisper_model)
+        return WhisperTranscriber(settings.whisper_model, cache_dir=os.environ.get("WHISPER_CACHE_DIR"))
     return NullTranscriber()
 
 
@@ -120,7 +151,9 @@ def extract(conn, settings: Settings, source_id: int, transcriber: Transcriber |
     cuts = scene_changes(path)
     curve = loudness_curve(path)
     peaks = loudness_peaks(curve)
-    segments = (transcriber or make_transcriber(settings)).transcribe(path)
+    if transcriber is None:
+        transcriber = make_transcriber(settings) if settings.transcribe_full else NullTranscriber()
+    segments = transcriber.transcribe(path)
     windows = candidate_windows(src["duration_s"], cuts, peaks, length_s=window_s)
     for w in windows:
         text = " ".join(s.text for s in segments if s.end > w["start_s"] and s.start < w["end_s"])
@@ -129,7 +162,7 @@ def extract(conn, settings: Settings, source_id: int, transcriber: Transcriber |
             (source_id, w["start_s"], w["end_s"], w["signal_score"], text or None),
         )
     signals = {"scene_cuts": cuts, "loudness_peaks": peaks,
-               "transcript": [s.__dict__ for s in segments], "windows": len(windows)}
+               "transcript": [{"start": s.start, "end": s.end, "text": s.text} for s in segments], "windows": len(windows)}
     conn.execute("UPDATE sources SET status = 'analysed', signals = %s WHERE id = %s", (db.Jsonb(signals), source_id))
     db.log_event(conn, "signals", "source", source_id, "analysed", {"windows": len(windows)})
     conn.commit()

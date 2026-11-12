@@ -10,11 +10,15 @@ COPY pyproject.toml ./
 COPY src ./src
 COPY db ./db
 COPY config ./config
-RUN pip install --no-cache-dir .
+# Optional local speech-to-text for subtitles (free, CPU). Build with VICEPULSE_BUILD_WHISPER=1.
+ARG WHISPER=0
+RUN if [ "$WHISPER" = "1" ]; then pip install --no-cache-dir ".[whisper]"; else pip install --no-cache-dir .; fi
 
 RUN useradd --create-home vicepulse && mkdir -p /data && chown vicepulse /data
 USER vicepulse
 ENV VICEPULSE_DATA_DIR=/data \
-    VICEPULSE_HOME=/app
+    VICEPULSE_HOME=/app \
+    WHISPER_CACHE_DIR=/data/models/whisper \
+    HF_HOME=/data/models/hf
 EXPOSE 8088
 CMD ["vicepulse", "serve"]

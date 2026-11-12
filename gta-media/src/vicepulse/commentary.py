@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from . import db, dedupe
 from .config import Settings
 from .llm import LLM
@@ -34,9 +36,71 @@ def caption_cues(script: dict, duration: float) -> list[dict]:
     return cues
 
 
-def write_scripts(conn, settings: Settings, llm: LLM, *, clip_ids: list[int] | None = None) -> dict:
+PAUSE_BREAK_S = 0.6
+MAX_CUE_S = 2.5
+_END_PUNCT = re.compile(r"[.!?,;:…]$")
+
+
+def transcript_cues(segments, duration: float, *, words_per_cue: int = WORDS_PER_CUE) -> list[dict]:
+    """Subtitles from what is actually said: Whisper word timings (relative to the clip start).
+
+    Words are grouped into short cues, breaking at punctuation, at pauses and every few words, and each
+    cue is shown exactly while its words are spoken (lightly extended so short words stay readable).
+    """
+    words = [w for seg in segments for w in (seg.words if hasattr(seg, "words") else seg.get("words", []))]
+    words = [w for w in words if w["end"] > 0 and w["start"] < duration]
+    cues: list[dict] = []
+    group: list[dict] = []
+
+    def flush():
+        if group:
+            cues.append({"start": max(0.0, group[0]["start"]), "end": min(duration, group[-1]["end"]),
+                         "text": " ".join(w["text"] for w in group), "kind": "speech"})
+            group.clear()
+
+    for w in words:
+        if group and (w["start"] - group[-1]["end"] > PAUSE_BREAK_S or w["end"] - group[0]["start"] > MAX_CUE_S):
+            flush()
+        group.append(w)
+        if len(group) >= words_per_cue or _END_PUNCT.search(w["text"]):
+            flush()
+    flush()
+    for i, c in enumerate(cues):                     # minimum on-screen time, never overlapping the next cue
+        nxt = cues[i + 1]["start"] if i + 1 < len(cues) else duration
+        c["end"] = round(min(max(c["end"], c["start"] + 0.7), nxt), 3)
+        c["start"] = round(c["start"], 3)
+    return [c for c in cues if c["end"] > c["start"]]
+
+
+def use_transcript(settings: Settings) -> bool:
+    if settings.captions == "transcript":
+        return True
+    return settings.captions == "auto" and settings.transcriber == "whisper"
+
+
+def build_captions(settings: Settings, clip: dict, result: dict, transcriber=None) -> tuple[list[dict], str]:
+    """Caption cues for a clip and where they came from: 'transcript' (real speech) or 'script'."""
+    duration = clip["out_s"] - clip["in_s"]
+    if use_transcript(settings) and clip.get("file_path"):
+        from . import signals
+
+        tr = transcriber or signals.make_transcriber(settings)
+        segments = tr.transcribe(clip["file_path"], start=clip["in_s"], duration=duration)
+        speech = transcript_cues(segments, duration)
+        if speech or settings.captions == "transcript":
+            if settings.llm_mode == "mock":
+                # The offline mock writes generic hooks that may not match this clip; show only what is said.
+                return speech, "transcript" if speech else "none (no speech heard)"
+            hook_end = min(HOOK_WINDOW_S, duration * 0.25)
+            # The hook stays as a short title card at the top; the spoken words are the subtitles.
+            hook = [{"start": 0.0, "end": round(hook_end, 3), "text": result["hook"], "kind": "hook_top"}]
+            return hook + speech, "transcript" if speech else "none (no speech heard)"
+    return caption_cues(result, duration), "script"
+
+
+def write_scripts(conn, settings: Settings, llm: LLM, *, clip_ids: list[int] | None = None, transcriber=None) -> dict:
     rows = conn.execute(
-        """SELECT cl.*, ch.key AS channel_key, s.game, r.credit_text FROM clips cl
+        """SELECT cl.*, ch.key AS channel_key, s.game, s.file_path, r.credit_text FROM clips cl
            JOIN channels ch ON ch.id = cl.channel_id
            JOIN candidates c ON c.id = cl.candidate_id JOIN sources s ON s.id = c.source_id
            LEFT JOIN rights_ledger r ON r.id = s.rights_id
@@ -47,9 +111,10 @@ def write_scripts(conn, settings: Settings, llm: LLM, *, clip_ids: list[int] | N
         channel = settings.channel(clip["channel_key"])
         frames = sorted(settings.dir("frames").glob(f"cand{clip['candidate_id']}_*.jpg"))
         result = llm.script(channel, dict(clip), frames, game=clip["game"])
+        captions, caption_source = build_captions(settings, dict(clip), result, transcriber)
         script = {"hook": result["hook"], "body": result["body"], "closer": result["closer"],
                   "angle": result["angle"], "language": clip["language"],
-                  "captions": caption_cues(result, clip["out_s"] - clip["in_s"])}
+                  "captions": captions, "caption_source": caption_source}
         titles = {p: dict(result[p]) for p in ("youtube", "instagram", "tiktok")}
         if clip["credit_text"]:
             # Licences such as CC BY or a creator's terms require attribution: put the credit in every description.

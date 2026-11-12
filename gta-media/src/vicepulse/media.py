@@ -26,6 +26,13 @@ def run(args: list[str]) -> subprocess.CompletedProcess:
     return proc
 
 
+def run_bytes(args: list[str]) -> bytes:
+    proc = subprocess.run(args, capture_output=True)
+    if proc.returncode != 0:
+        raise MediaError(f"command failed ({proc.returncode}): {' '.join(args[:6])}...\n{proc.stderr[-2000:].decode(errors='replace')}")
+    return proc.stdout
+
+
 def probe(path: str | Path) -> dict:
     out = run(["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)]).stdout
     data = json.loads(out)

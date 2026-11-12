@@ -94,6 +94,25 @@ vicepulse health
 `vicepulse --help` lists every command. The n8n stack (`docker compose up`) is described at the top of
 `docker-compose.yml`; it has not been run as a deployment.
 
+## One highlight from a video on your PC
+
+```powershell
+git pull
+powershell -ExecutionPolicy Bypass -File scripts\make-highlight.ps1
+```
+
+The script lists the videos in your Downloads folder (or takes `-Path "C:\...\video.mp4"`), asks one
+question about where the footage comes from (your own recording, a CC BY/CC0 licence, or written creator
+permission; anything else stops), adds local Whisper to the worker the first time (`VICEPULSE_BUILD_WHISPER=1`,
+free and offline, data and volumes kept), then runs `vicepulse highlight`. That command picks the best
+30-60 s window, transcribes only that window, burns word-timed subtitles of what is actually said,
+reframes to 1080x1920, and saves the MP4 to `Videos\VicePulse`, then opens it. The clip waits in
+`pending_approval`; nothing is published.
+
+Subtitle source (`VICEPULSE_CAPTIONS`): `auto` uses real speech when `VICEPULSE_TRANSCRIBER=whisper`, otherwise
+the commentary script; `transcript` shows only real speech (no speech means no subtitles, never invented
+text). With the offline mock LLM, the generic hook card is left out of transcript subtitles.
+
 ## Creator discovery (Priority 1)
 
 `vicepulse discovery-run` (n8n workflow 08: discover every 6 hours, monitor every 20 minutes) finds and

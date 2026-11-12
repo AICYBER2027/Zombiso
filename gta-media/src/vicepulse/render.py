@@ -37,13 +37,14 @@ def build_ass(cues: list[dict], platform: str) -> str:
         "Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, "
         "MarginR, MarginV, Encoding\n"
         f"Style: Cap,{FONT},84,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,2,2,80,80,{margin},1\n"
-        f"Style: Hook,{FONT},96,&H0000F6FF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,7,2,2,80,80,{margin},1\n\n"
+        f"Style: Hook,{FONT},96,&H0000F6FF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,7,2,2,80,80,{margin},1\n"
+        f"Style: HookTop,{FONT},88,&H0000F6FF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,7,2,8,80,80,260,1\n\n"
         "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
     lines = []
     for c in cues:
         text = c["text"].replace("\\", "").replace("{", "(").replace("}", ")").replace("\n", " ")
-        style = "Hook" if c.get("kind") == "hook" else "Cap"
+        style = {"hook": "Hook", "hook_top": "HookTop"}.get(c.get("kind"), "Cap")
         lines.append(f"Dialogue: 0,{_ass_time(c['start'])},{_ass_time(c['end'])},{style},,0,0,0,,{text}")
     return head + "\n".join(lines) + "\n"
 
@@ -151,12 +152,13 @@ def render_pending(conn, settings: Settings, voice: VoiceProvider | None = None,
             conn.execute(
                 """INSERT INTO renders (clip_id, platform, file_path, file_sha256, width, height, duration_s,
                                         has_voice, has_captions)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (clip_id, platform) DO UPDATE SET file_path = EXCLUDED.file_path,
                        file_sha256 = EXCLUDED.file_sha256, width = EXCLUDED.width, height = EXCLUDED.height,
-                       duration_s = EXCLUDED.duration_s, has_voice = EXCLUDED.has_voice, created_at = now()""",
+                       duration_s = EXCLUDED.duration_s, has_voice = EXCLUDED.has_voice,
+                       has_captions = EXCLUDED.has_captions, created_at = now()""",
                 (clip["id"], platform, str(path), media.sha256_file(path), meta["width"], meta["height"],
-                 meta["duration"], voice_path is not None))
+                 meta["duration"], voice_path is not None, bool(clip["script"]["captions"])))
             out["files"].append(str(path))
         conn.execute("UPDATE clips SET status = 'rendered', voice_path = %s WHERE id = %s",
                      (str(voice_path) if voice_path else None, clip["id"]))

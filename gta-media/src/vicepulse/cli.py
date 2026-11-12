@@ -101,6 +101,14 @@ def cmd_daily(a, s, conn):
     return out
 
 
+def cmd_highlight(a, s, conn):
+    if not 15 <= a.clip_seconds <= 60:
+        raise ValueError("--clip-seconds must be between 15 and 60")
+    return autosource.highlight(conn, s, make_llm(s), a.file, rights=a.rights, channel=a.channel,
+                                clip_seconds=a.clip_seconds, licence=a.licence, author=a.author, url=a.url,
+                                creator=a.creator)
+
+
 def cmd_autoclip(a, s, conn):
     if not 15 <= a.clip_seconds <= 60:
         raise ValueError("--clip-seconds must be between 15 and 60")
@@ -274,6 +282,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--layout", default="auto", choices=["auto", "crop", "blur"])
     sp = add("check", cmd_check, "final policy and quality check, then queue for approval")
     sp.add_argument("--clips")
+    sp = add("highlight", cmd_highlight, "one subtitled vertical highlight from one file you point at (no publishing)")
+    sp.add_argument("--file", required=True)
+    sp.add_argument("--rights", required=True, choices=["own", "cc", "permission"])
+    sp.add_argument("--licence", default="", help="cc: licence name, e.g. 'CC BY 4.0'")
+    sp.add_argument("--author", default="", help="cc: the author to credit")
+    sp.add_argument("--url", default="", help="cc: licence/file page; permission: link to the written permission")
+    sp.add_argument("--creator", default="", help="permission: the creator's name")
+    sp.add_argument("--channel", default="en", choices=["en", "br"])
+    sp.add_argument("--clip-seconds", type=float, default=45.0)
     sp = add("autoclip", cmd_autoclip, "hands-free: fetch legitimately usable footage, clip, subtitle, render, save MP4")
     sp.add_argument("--source", default="all", choices=["all", "commons", "own"])
     sp.add_argument("--channel", help="comma list of channels, default from config (en)")
