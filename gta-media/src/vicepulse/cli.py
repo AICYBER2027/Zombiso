@@ -36,7 +36,9 @@ def cmd_migrate(a, s, conn):
 
 
 def cmd_rights_add(a, s, conn):
-    fields = json.loads(a.json)
+    if bool(a.json) == bool(a.json_file):
+        raise ValueError("give exactly one of --json or --json-file")
+    fields = json.loads(a.json) if a.json else json.loads(open(a.json_file, encoding="utf-8").read())
     return {"rights_id": ingest.add_rights(conn, **fields)}
 
 
@@ -231,7 +233,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("migrate", cmd_migrate, "apply database migrations and seed the EN / BR channels")
     sp = add("rights-add", cmd_rights_add, "add a rights ledger entry (unverified until rights-verify)")
-    sp.add_argument("--json", required=True, help="ledger fields as JSON")
+    sp.add_argument("--json", help="ledger fields as JSON")
+    sp.add_argument("--json-file", help="path to a JSON file with the ledger fields (easier from Windows PowerShell)")
     sp = add("rights-verify", cmd_rights_verify, "record that a person checked the signed licence")
     sp.add_argument("--id", type=int, required=True)
     sp.add_argument("--by", required=True)
