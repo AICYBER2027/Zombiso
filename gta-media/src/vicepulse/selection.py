@@ -46,7 +46,8 @@ def _examples(conn, channel_id: int) -> list[dict]:
     return [dict(r, label="best") for r in best] + [dict(r, label="worst") for r in worst]
 
 
-def select_for_channel(conn, settings: Settings, llm: LLM, channel_key: str, for_date: date) -> dict:
+def select_for_channel(conn, settings: Settings, llm: LLM, channel_key: str, for_date: date,
+                       max_clips: int | None = None) -> dict:
     channel_cfg = settings.channel(channel_key)
     ch = conn.execute("SELECT * FROM channels WHERE key = %s", (channel_key,)).fetchone()
     have = conn.execute(
@@ -54,6 +55,8 @@ def select_for_channel(conn, settings: Settings, llm: LLM, channel_key: str, for
            AND status NOT IN ('duplicate', 'rejected', 'failed_check', 'blocked', 'taken_down')""",
         (ch["id"], for_date)).fetchone()["n"]
     need = max(0, ch["clips_per_day"] - have)
+    if max_clips is not None:
+        need = min(need, max(0, max_clips))
     if need == 0:
         return {"channel": channel_key, "selected": [], "duplicates": [], "note": "day already full"}
     finalists = conn.execute(
