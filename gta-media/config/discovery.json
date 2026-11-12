@@ -140,5 +140,21 @@
     "@rockstargames"
   ],
   "not_gta_min_items": 6,
-  "_blocked": "Channels to never treat as clipping sources (the publisher's own channel). Handles as YouTube shows them (@...) or Twitch logins."
+  "_blocked": "Channels to never treat as clipping sources (the publisher's own channel). Handles as YouTube shows them (@...) or Twitch logins.",
+  "autosource": {
+    "_note": "vicepulse autoclip: Wikimedia Commons videos whose licence allows edits (PD, CC0, CC BY) and the owner's own recordings folder. No YouTube/Twitch downloading.",
+    "commons_queries": [
+      "video game gameplay",
+      "Minecraft gameplay",
+      "Grand Theft Auto gameplay",
+      "open world game gameplay"
+    ],
+    "channels": [
+      "en"
+    ],
+    "max_files_per_run": 2,
+    "max_file_mb": 200,
+    "max_duration_s": 900,
+    "allow_share_alike": false
+  }
 }

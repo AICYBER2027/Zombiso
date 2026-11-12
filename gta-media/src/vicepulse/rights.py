@@ -107,4 +107,9 @@ def prepublish_gate(conn, clip_id: int, platform: str, *, on: date | None = None
     if row["clip_status"] in ("blocked", "taken_down"):
         return RightsDecision(False, [f"clip is {row['clip_status']}"])
     grant = row if row.get("licence_type") else None
-    return check_grant(grant, on=on, platform=platform, language=row["clip_language"], monetised=monetised)
+    decision = check_grant(grant, on=on, platform=platform, language=row["clip_language"], monetised=monetised)
+    if grant and (grant.get("verified_by") or "").startswith("auto:"):
+        decision.ok = False
+        decision.reasons.append("licence was accepted automatically; a person must confirm it "
+                                "(vicepulse rights-verify) before anything is published")
+    return decision

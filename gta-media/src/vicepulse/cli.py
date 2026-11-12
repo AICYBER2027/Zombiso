@@ -12,7 +12,7 @@ import json
 import sys
 from datetime import date, datetime, timezone
 
-from . import commentary, db, discovery, ingest, policy, publish, render, selection, signals
+from . import autosource, commentary, db, discovery, ingest, policy, publish, render, selection, signals
 from .config import Settings
 from .llm import make_llm
 
@@ -99,6 +99,14 @@ def cmd_daily(a, s, conn):
     out["render"] = render.render_pending(conn, s, layout=a.layout)
     out["check"] = policy.final_check(conn, s, make_llm(s))
     return out
+
+
+def cmd_autoclip(a, s, conn):
+    if not 15 <= a.clip_seconds <= 60:
+        raise ValueError("--clip-seconds must be between 15 and 60")
+    return autosource.run(conn, s, make_llm(s), discovery.load_config(), sources=a.source,
+                          channels=a.channel.split(",") if a.channel else None, clip_seconds=a.clip_seconds,
+                          max_clips=a.max_clips)
 
 
 def cmd_queue(a, s, conn):
@@ -266,6 +274,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--layout", default="auto", choices=["auto", "crop", "blur"])
     sp = add("check", cmd_check, "final policy and quality check, then queue for approval")
     sp.add_argument("--clips")
+    sp = add("autoclip", cmd_autoclip, "hands-free: fetch legitimately usable footage, clip, subtitle, render, save MP4")
+    sp.add_argument("--source", default="all", choices=["all", "commons", "own"])
+    sp.add_argument("--channel", help="comma list of channels, default from config (en)")
+    sp.add_argument("--clip-seconds", type=float, default=30.0)
+    sp.add_argument("--max-clips", type=int, default=1, help="clips per file per channel")
     add("queue", cmd_queue, "list clips waiting for approval")
     sp = add("decide", cmd_decide, "approve or reject a clip")
     sp.add_argument("--clip", type=int, required=True)
