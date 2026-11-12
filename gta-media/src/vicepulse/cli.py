@@ -185,7 +185,10 @@ def cmd_sources_check(a, s, conn):
 
 
 def cmd_languages(a, s, conn):
-    return discovery.classify_languages(conn, discovery.load_config())
+    cfg = discovery.load_config()
+    out = discovery.classify_languages(conn, cfg)
+    out["pruned"] = discovery.prune_untargeted(conn, cfg)
+    return out
 
 
 def cmd_opportunities(a, s, conn):

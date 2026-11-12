@@ -228,9 +228,12 @@ def _save_tw_user(conn, tw: Twitch, u: dict, *, via: str, name: str | None = Non
 
 def discover(conn, cfg: dict, yt: YouTubeData | None, tw: Twitch | None) -> dict:
     out = {"seeds_resolved": [], "seeds_not_found": [], "new_channels": [], "skipped_small": 0,
-           "skipped_language": [], "searches_run": [], "searches_skipped": [], "errors": []}
+           "skipped_language": [], "skipped_not_gta": [], "skipped_blocked": [], "searches_run": [],
+           "searches_skipped": [], "errors": []}
     targets = tuple(cfg.get("target_languages", list(language.TARGETS)))
-    limit = cfg.get("max_new_creators_per_run", 25)
+    limit = cfg.get("max_new_creators_per_run", 25)          # per platform, so YouTube cannot crowd out Twitch
+    added = {"youtube": 0, "twitch": 0}
+    blocked = {h.lower() for h in cfg.get("blocked_handles", [])}
     min_f = cfg.get("min_followers", 0)
 
     # 1. seeds (only those not resolved yet)
@@ -293,9 +296,20 @@ def discover(conn, cfg: dict, yt: YouTubeData | None, tw: Twitch | None) -> dict
                 if subs < min_f:
                     out["skipped_small"] += 1
                     continue
-                if len(out["new_channels"]) >= limit:
+                if added["youtube"] >= limit:
                     break
                 sn = ch.get("snippet", {})
+                if (sn.get("customUrl") or "").lower() in blocked:
+                    out["skipped_blocked"].append(sn.get("title"))
+                    continue
+                # Live/upcoming searches also return unrelated streams (countdowns, cartoons, music): a new channel
+                # needs at least one GTA video among its search hits.
+                hits = by_channel.get(ch["id"], [])
+                if not any(detect_game(" ".join([v["snippet"].get("title") or "", " ".join(v["snippet"].get("tags") or []),
+                                                 (v["snippet"].get("description") or "")[:500]]), cfg) in ("gta6", "gta5")
+                           for v in hits):
+                    out["skipped_not_gta"].append(sn.get("title"))
+                    continue
                 verdict = language.classify_channel(
                     country=sn.get("country"), description=sn.get("description"),
                     items=[{"language": v["snippet"].get("defaultAudioLanguage") or v["snippet"].get("defaultLanguage"),
@@ -307,6 +321,7 @@ def discover(conn, cfg: dict, yt: YouTubeData | None, tw: Twitch | None) -> dict
                 lang = "pt-BR" if (verdict["language"] == "pt" or sn.get("country") == "BR") else verdict["language"]
                 row = _save_yt_channel(conn, ch, via="youtube_search", language=lang)
                 out["new_channels"].append(row["title"])
+                added["youtube"] += 1
                 known.add(ch["id"])
             for cref, vs in by_channel.items():
                 if cref not in known:
@@ -331,13 +346,14 @@ def discover(conn, cfg: dict, yt: YouTubeData | None, tw: Twitch | None) -> dict
                 streams = []
                 for lang in cfg.get("twitch_languages", ["en"]):
                     streams += tw.streams_for_game(gid, language=lang)
-                users = {u["id"]: u for u in tw.users(ids=sorted({s["user_id"] for s in streams})[:100])}
+                top_ids = list(dict.fromkeys(s["user_id"] for s in sorted(streams, key=lambda s: -s.get("viewer_count", 0))))[:100]
+                users = {u["id"]: u for u in tw.users(ids=top_ids)}
                 for s in sorted(streams, key=lambda s: -s.get("viewer_count", 0)):
                     row = conn.execute("SELECT * FROM creator_channels WHERE platform = 'twitch' AND channel_ref = %s",
                                        (s["user_id"],)).fetchone()
                     if row is None:
                         u = users.get(s["user_id"])
-                        if not u or len(out["new_channels"]) >= limit:
+                        if not u or added["twitch"] >= limit:
                             continue
                         followers = tw.followers_total(u["id"])
                         big_enough = (followers >= min_f) if followers is not None else \
@@ -352,10 +368,12 @@ def discover(conn, cfg: dict, yt: YouTubeData | None, tw: Twitch | None) -> dict
                                              description=u.get("description") or None,
                                              url=f"https://www.twitch.tv/{u.get('login')}", followers=followers)
                         out["new_channels"].append(row["title"])
+                        added["twitch"] += 1
                     upsert_content(conn, row["id"], "twitch", tw_stream_item(s, cfg))
             conn.commit()
         except SourceError as e:
             out["errors"].append(f"twitch: {e}")
+    out["added"] = added
     return out
 
 
@@ -440,7 +458,8 @@ def monitor(conn, cfg: dict, yt: YouTubeData | None, tw: Twitch | None, *, uploa
     for r in conn.execute("""SELECT cr.display_name, cc.platform, ct.title, ct.live_viewers, ct.game, ct.url
                              FROM creator_content ct JOIN creator_channels cc ON cc.id = ct.channel_id
                              JOIN creators cr ON cr.id = cc.creator_id
-                             WHERE ct.kind = 'live' ORDER BY ct.live_viewers DESC NULLS LAST LIMIT 20""").fetchall():
+                             WHERE ct.kind = 'live' AND ct.game IN ('gta6', 'gta5') AND cc.tracked
+                             ORDER BY ct.live_viewers DESC NULLS LAST LIMIT 20""").fetchall():
         out["live_now"].append(dict(r))
     for r in conn.execute("""SELECT cr.display_name, cc.platform, ct.title, ct.scheduled_start, ct.game, ct.url
                              FROM creator_content ct JOIN creator_channels cc ON cc.id = ct.channel_id
@@ -452,6 +471,37 @@ def monitor(conn, cfg: dict, yt: YouTubeData | None, tw: Twitch | None, *, uploa
 
 
 # ---------------------------------------------------------------- language
+
+def prune_untargeted(conn, cfg: dict) -> dict:
+    """Stop monitoring channels that are not creators to clip. Records are kept; seeds are never pruned.
+
+    - blocked_handles in config/discovery.json (e.g. the publisher's own channel)
+    - channels with at least ``not_gta_min_items`` recent items and none of them GTA
+    """
+    blocked = {h.lower() for h in cfg.get("blocked_handles", [])}
+    min_items = cfg.get("not_gta_min_items", 6)
+    out = {"blocked": [], "not_gta": []}
+    rows = conn.execute("""SELECT cc.*, cr.seed, cr.display_name,
+                                  (SELECT count(*) FROM creator_content ct WHERE ct.channel_id = cc.id
+                                    AND ct.last_seen_at > now() - interval '21 days') AS recent,
+                                  (SELECT count(*) FROM creator_content ct WHERE ct.channel_id = cc.id
+                                    AND ct.game IN ('gta6', 'gta5')) AS gta
+                           FROM creator_channels cc JOIN creators cr ON cr.id = cc.creator_id
+                           WHERE cc.tracked AND NOT cr.seed""").fetchall()
+    for ch in rows:
+        reason = None
+        if (ch["handle"] or "").lower() in blocked:
+            reason, key = "blocked: not a creator to clip (config blocked_handles)", "blocked"
+        elif ch["recent"] >= min_items and ch["gta"] == 0:
+            reason, key = f"not GTA: none of {ch['recent']} recent items are GTA", "not_gta"
+        if reason:
+            conn.execute("UPDATE creator_channels SET tracked = FALSE, excluded_reason = %s, excluded_at = now() WHERE id = %s",
+                         (reason, ch["id"]))
+            db.log_event(conn, "prune", "creator_channel", ch["id"], key, {"reason": reason})
+            out[key].append(ch["display_name"] or ch["title"] or ch["handle"])
+    conn.commit()
+    return out
+
 
 def classify_languages(conn, cfg: dict) -> dict:
     """Detect each tracked channel's language; stop monitoring confirmed off-target channels (records are kept).
@@ -758,6 +808,7 @@ def run_all(conn, cfg: dict, yt, tw, notes: list[str]) -> dict:
     d = discover(conn, cfg, yt, tw) if (yt or tw) else {"skipped": True}
     m = monitor(conn, cfg, yt, tw) if (yt or tw) else {"skipped": True}
     lang = classify_languages(conn, cfg)
+    lang["pruned"] = prune_untargeted(conn, cfg)
     p = check_permissions(conn)
     r = rank(conn, cfg)
     return {"notes": notes, "discover": d, "monitor": m, "languages": lang,
