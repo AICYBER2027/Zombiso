@@ -75,7 +75,8 @@ def cmd_select(a, s, conn):
     out = {"triage": selection.triage_new(conn, s, llm), "channels": []}
     for ch in ([a.channel] if a.channel else [c["key"] for c in s.channels()]):
         out["channels"].append(selection.select_for_channel(conn, s, llm, ch, _day(a.date),
-                                                            max_clips=getattr(a, "max_clips", None)))
+                                                            max_clips=getattr(a, "max_clips", None),
+                                                            source_id=getattr(a, "source_id", None)))
     return out
 
 
@@ -255,6 +256,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--channel")
         sp.add_argument("--date")
         sp.add_argument("--max-clips", type=int, help="at most this many new clips per channel (default: the daily quota)")
+        sp.add_argument("--source-id", type=int, help="only choose moments from this footage file")
         if name == "daily":
             sp.add_argument("--layout", default="auto", choices=["auto", "crop", "blur"])
     sp = add("script", cmd_script, "write commentary, captions and titles")

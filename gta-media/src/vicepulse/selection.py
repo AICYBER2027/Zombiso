@@ -47,7 +47,7 @@ def _examples(conn, channel_id: int) -> list[dict]:
 
 
 def select_for_channel(conn, settings: Settings, llm: LLM, channel_key: str, for_date: date,
-                       max_clips: int | None = None) -> dict:
+                       max_clips: int | None = None, source_id: int | None = None) -> dict:
     channel_cfg = settings.channel(channel_key)
     ch = conn.execute("SELECT * FROM channels WHERE key = %s", (channel_key,)).fetchone()
     have = conn.execute(
@@ -64,8 +64,9 @@ def select_for_channel(conn, settings: Settings, llm: LLM, channel_key: str, for
                   c.keyframe_hashes, s.game
            FROM candidates c JOIN sources s ON s.id = c.source_id
            WHERE c.status IN ('triaged', 'selected') AND s.status = 'analysed'
+             AND (%s::int IS NULL OR c.source_id = %s::int)
              AND NOT EXISTS (SELECT 1 FROM clips cl WHERE cl.candidate_id = c.id AND cl.channel_id = %s)
-           ORDER BY c.triage_score DESC NULLS LAST LIMIT %s""", (ch["id"], FINALISTS)).fetchall()
+           ORDER BY c.triage_score DESC NULLS LAST LIMIT %s""", (source_id, source_id, ch["id"], FINALISTS)).fetchall()
     # Layers 1-2 of duplicate prevention before the model sees anything: candidates that repeat a
     # clip this channel already has are never offered.
     filtered = []

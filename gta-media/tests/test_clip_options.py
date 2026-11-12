@@ -58,9 +58,11 @@ def test_cc_licensed_footage_carries_attribution(settings, conn, other_footage, 
     code, ing = run(capsys, "ingest", "--file", str(other_footage), "--origin", "creator_upload", "--rights-id", str(rid))
     assert code == 0 and ing["status"] == "cleared", ing
     assert run(capsys, "signals", "--clip-seconds", "15")[0] == 0
-    code, daily = run(capsys, "daily", "--channel", "en", "--max-clips", "1")
+    code, daily = run(capsys, "daily", "--channel", "en", "--max-clips", "1", "--source-id", str(ing["source_id"]))
     assert code == 0
     clip = conn.execute("SELECT * FROM clips").fetchone()
+    src = conn.execute("SELECT c.source_id FROM candidates c WHERE c.id = %s", (clip["candidate_id"],)).fetchone()
+    assert src["source_id"] == ing["source_id"]
     for p in ("youtube", "instagram", "tiktok"):
         assert clip["titles"][p]["description"].endswith("Gameplay: Xbox México (CC BY 4.0), via Wikimedia Commons")
     assert run(capsys, "rights-add")[0] == 1                       # needs --json or --json-file
