@@ -81,6 +81,33 @@
       "eventType": "upcoming",
       "regionCode": "US",
       "relevanceLanguage": "en"
+    },
+    {
+      "q": "GTA 6 gameplay português",
+      "regionCode": "BR",
+      "relevanceLanguage": "pt"
+    },
+    {
+      "q": "GTA RP ao vivo",
+      "eventType": "live",
+      "regionCode": "BR",
+      "relevanceLanguage": "pt"
+    },
+    {
+      "q": "GTA 6 reação",
+      "regionCode": "BR",
+      "relevanceLanguage": "pt"
+    },
+    {
+      "q": "GTA 6 Brasil",
+      "regionCode": "BR",
+      "relevanceLanguage": "pt"
+    },
+    {
+      "q": "GTA 6 livestream brasileiro",
+      "eventType": "upcoming",
+      "regionCode": "BR",
+      "relevanceLanguage": "pt"
     }
   ],
   "twitch_languages": [
@@ -106,5 +133,7 @@
   "_scoring": "creator score = 100 x weighted(audience, engagement, viral, live_now) x GTA factor x language factor; GTA factor = floor + (1 - floor) x GTA share of recent content, floor rising from gta_focus_floor (1M followers or less) to star_focus_floor (50M+), because big audiences follow a star into GTA. 'vicepulse opportunities' ranks individual GTA lives and fresh uploads by reach.",
   "star_focus_floor": 0.9,
   "unknown_language_factor": 0.85,
-  "_languages": "Only English and Portuguese (pt-BR) creators are monitored. 'vicepulse languages' detects each channel's language from platform language fields, country, titles and descriptions; channels confirmed to be in another language stop being monitored (records kept; seeds are never excluded automatically). Unknown-language channels stay and count x unknown_language_factor."
+  "_languages": "Only English and Portuguese (pt-BR) creators are monitored. 'vicepulse languages' detects each channel's language from platform language fields, country, titles and descriptions; channels confirmed to be in another language stop being monitored (records kept; seeds are never excluded automatically). Unknown-language channels stay and count x unknown_language_factor.",
+  "monitor_quota_reserve": 3000,
+  "_quota": "YouTube Data API: searches cost 100 units each, everything else 1. With 10 searches every 6 hours (4,000/day) plus monitoring every 20 minutes (~30 units per run for ~25 channels, ~2,200/day) the total stays under youtube_daily_quota_budget (8,000 of Google's default 10,000). Discovery stops searching when only monitor_quota_reserve units are left, so live monitoring never runs dry."
 }

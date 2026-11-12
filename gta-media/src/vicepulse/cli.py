@@ -180,6 +180,10 @@ def cmd_creators(a, s, conn):
     return {"creators": discovery.creator_report(conn, a.limit, a.include_excluded)}
 
 
+def cmd_sources_check(a, s, conn):
+    return discovery.sources_check(conn, discovery.load_config())
+
+
 def cmd_languages(a, s, conn):
     return discovery.classify_languages(conn, discovery.load_config())
 
@@ -267,6 +271,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("creators", cmd_creators, "list ranked creators with their permission status")
     sp.add_argument("--limit", type=int, default=50)
     sp.add_argument("--include-excluded", action="store_true", help="also list channels excluded for language")
+    add("sources-check", cmd_sources_check, "test the YouTube key and Twitch credentials (no secrets printed)")
     add("languages", cmd_languages, "detect channel languages; stop monitoring confirmed non-EN/PT channels")
     sp = add("opportunities", cmd_opportunities, "GTA livestreams now and fresh GTA uploads, ranked by reach")
     sp.add_argument("--limit", type=int, default=30)

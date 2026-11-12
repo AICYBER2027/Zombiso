@@ -92,6 +92,28 @@ def make_clients(conn, cfg: dict) -> tuple[YouTubeData | None, Twitch | None, li
     return yt, tw, notes
 
 
+def sources_check(conn, cfg: dict) -> dict:
+    """Check the YouTube key and Twitch credentials without printing them (YouTube: 1 quota unit)."""
+    yt, tw, notes = make_clients(conn, cfg)
+    out = {"youtube": {"configured": yt is not None}, "twitch": {"configured": tw is not None}, "notes": notes}
+    if yt:
+        try:
+            ch = yt.channel_by_handle("@IShowSpeed")
+            out["youtube"].update(ok=True, test=f"found {ch['snippet']['title']}" if ch else "key works, handle not found",
+                                  quota_used_today=yt.spend.used() if isinstance(yt.spend, QuotaBudget) else None,
+                                  quota_budget=yt.spend.limit if isinstance(yt.spend, QuotaBudget) else None)
+        except SourceError as e:
+            out["youtube"].update(ok=False, error=str(e).replace(os.environ.get("YOUTUBE_DATA_API_KEY", "\0"), "***"))
+    if tw:
+        try:
+            cats = {g: tw.game_id(cfg["games"][g]["twitch_category"]) for g in ("gta6", "gta5")}
+            out["twitch"].update(ok=True, categories={g: (cfg["games"][g]["twitch_category"] + (f" (id {i})" if i else
+                                                       " (not on Twitch yet)")) for g, i in cats.items()})
+        except SourceError as e:
+            out["twitch"].update(ok=False, error=str(e))
+    return out
+
+
 # ---------------------------------------------------------------- storage helpers
 
 def _creator_for(conn, name: str, language: str | None, seed: bool) -> int:
@@ -206,7 +228,7 @@ def _save_tw_user(conn, tw: Twitch, u: dict, *, via: str, name: str | None = Non
 
 def discover(conn, cfg: dict, yt: YouTubeData | None, tw: Twitch | None) -> dict:
     out = {"seeds_resolved": [], "seeds_not_found": [], "new_channels": [], "skipped_small": 0,
-           "skipped_language": [], "errors": []}
+           "skipped_language": [], "searches_run": [], "searches_skipped": [], "errors": []}
     targets = tuple(cfg.get("target_languages", list(language.TARGETS)))
     limit = cfg.get("max_new_creators_per_run", 25)
     min_f = cfg.get("min_followers", 0)
@@ -245,7 +267,14 @@ def discover(conn, cfg: dict, yt: YouTubeData | None, tw: Twitch | None) -> dict
     if yt:
         try:
             video_ids: list[str] = []
+            reserve = cfg.get("monitor_quota_reserve", 0)
             for s in cfg.get("youtube_searches", []):
+                # Keep enough of today's budget for live monitoring: a search costs 100 units.
+                budget = yt.spend if isinstance(yt.spend, QuotaBudget) else None
+                if budget and budget.used() + 100 > budget.limit - reserve:
+                    out["searches_skipped"].append(s["q"])
+                    continue
+                out["searches_run"].append(s["q"])
                 after = None if s.get("eventType") else (_now() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
                 for it in yt.search_videos(s["q"], event_type=s.get("eventType"), region=s.get("regionCode"),
                                            language=s.get("relevanceLanguage"), published_after=after):

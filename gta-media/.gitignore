@@ -9,3 +9,4 @@ __pycache__/
 *.wav
 *.m4a
 e2e-output/
+discovery-run.json
