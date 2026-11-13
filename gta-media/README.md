@@ -113,6 +113,26 @@ Subtitle source (`VICEPULSE_CAPTIONS`): `auto` uses real speech when `VICEPULSE_
 the commentary script; `transcript` shows only real speech (no speech means no subtitles, never invented
 text). With the offline mock LLM, the generic hook card is left out of transcript subtitles.
 
+## Review page
+
+```powershell
+git pull
+docker compose build vicepulse
+docker compose up -d review
+```
+Open http://localhost:8090 on this PC. **Waiting for review** plays each pending clip (all three platform
+versions), shows its subtitles, description and rights, and has Approve / Reject. Approving records the
+decision only; nothing is published while `VICEPULSE_ALLOW_LIVE_PUBLISH=0`. **Creators** lets you authorize a
+creator who gave you permission: paste an https link to the proof (a screenshot in your Drive, an email, their
+public "clips allowed" post). The page is bound to 127.0.0.1 and refuses forms from other sites.
+
+## Picking the moment by what is said
+
+With Whisper on, VicePulse listens to the strongest few candidate moments (`VICEPULSE_SPEECH_RERANK_TOP`,
+default 6) and adds a bonus for reactions: phrases like "no way", "oh my god", "let's go", "meu deus",
+"não acredito", laughter, exclamations, repeated words and fast excited talk. Calm narration gets no bonus,
+so loud action with a reaction wins over quiet walking sections.
+
 ## Creator discovery (Priority 1)
 
 `vicepulse discovery-run` (n8n workflow 08: discover every 6 hours, monitor every 20 minutes) finds and

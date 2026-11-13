@@ -200,3 +200,33 @@ def test_mock_commentary_does_not_make_different_videos_duplicates(settings, con
     conn.commit()
     again = autosource.highlight(conn, s, MockLLM(), c, rights="own", clip_seconds=15)
     assert again["clips"] == [cid] and again["details"][0]["status"] == "pending_approval" and again["finished_files"]
+
+
+class ReactionAt:
+    """Calm narration everywhere except one moment where the streamer reacts."""
+
+    def __init__(self, hot_from):
+        self.hot_from = hot_from
+
+    def transcribe(self, path, start=None, duration=None):
+        start = start or 0.0
+        if start <= self.hot_from < start + (duration or 0):
+            words = ["NO", "WAY!", "Oh", "my", "god,", "go", "go", "go!", "Hahaha", "did", "you", "see", "that?"]
+        else:
+            words = ["Here", "we", "drive", "to", "the", "next", "mission", "point."]
+        return [Segment(0.5, 5.0, " ".join(words), [w(0.5 + i * 0.3, 0.8 + i * 0.3, t) for i, t in enumerate(words)])]
+
+
+def test_moment_with_reactions_wins(settings, conn, tmp_path, monkeypatch):
+    from conftest import make_footage
+    from vicepulse import autosource, signals
+    from vicepulse.llm import MockLLM
+    footage = make_footage(tmp_path / "stream.mp4", seg_s=10)       # bursts at 5, 15, 25, 35, 45, 55 s
+    hot = 38.0
+    monkeypatch.setattr(signals, "make_transcriber", lambda s: ReactionAt(hot))
+    s = dataclasses.replace(settings, transcriber="whisper", speech_rerank_top=8)
+    out = autosource.highlight(conn, s, MockLLM(), footage, rights="own", clip_seconds=15)
+    d = out["details"][0]
+    assert d["from_s"] <= hot < d["to_s"], d                          # the reaction is inside the chosen clip
+    sig = conn.execute("SELECT signals FROM sources").fetchone()["signals"]
+    assert sig["speech"] and max(x["bonus"] for x in sig["speech"]) > 2

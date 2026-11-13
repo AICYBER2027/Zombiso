@@ -123,6 +123,55 @@ def make_transcriber(settings: Settings) -> Transcriber:
     return NullTranscriber()
 
 
+# Reaction phrases that mark a moment worth clipping (lowercase; matched on word boundaries).
+REACTIONS = {
+    "en": ["no way", "oh my god", "oh my gosh", "omg", "let's go", "lets go", "what the", "holy", "wow", "insane",
+           "crazy", "bro", "run", "go go", "yes", "nooo", "no no no", "look at this", "did you see", "how did",
+           "unbelievable", "clutch", "get out", "watch this", "oh no", "what"],
+    "pt": ["meu deus", "não acredito", "nao acredito", "nossa", "vamos", "caraca", "mano", "corre", "que isso",
+           "olha isso", "olha só", "socorro", "absurdo", "inacreditável", "sai daí", "vai vai", "não não", "uau",
+           "eita", "mds"],
+}
+_LAUGH = re.compile(r"\b(?:ha(?:ha)+|he(?:he)+|k{4,}|lol|lmao|rs(?:rs)+)\b|\((?:laugh|laughs|laughing|risos)\)", re.I)
+_PHRASES = [re.compile(r"(?<!\w)" + re.escape(p) + r"(?!\w)") for lang in REACTIONS.values() for p in lang]
+
+
+def speech_score(segments: list[Segment], duration: float) -> tuple[float, dict]:
+    """0..6: how much the speech in a window sounds like a reaction worth clipping."""
+    text = " ".join(s.text for s in segments).strip()
+    if not text:
+        return 0.0, {"words": 0}
+    low = text.lower()
+    words = len(low.split())
+    hits = sum(len(p.findall(low)) for p in _PHRASES)
+    laughs = len(_LAUGH.findall(text))
+    excl = text.count("!")
+    questions = text.count("?")
+    rate = words / max(duration, 1.0)                      # words per second; calm narration is about 2
+    repeats = len(re.findall(r"\b(\w+)(?:[\s,!.]+\1\b)+", low))   # "go go go", "no no no"
+    score = (min(hits, 6) * 0.6 + min(laughs, 3) * 0.8 + min(excl, 5) * 0.3 + min(questions, 3) * 0.15
+             + max(0.0, min(rate - 2.0, 2.0)) * 0.5 + min(repeats, 3) * 0.4)
+    return round(min(score, 6.0), 3), {"words": words, "reactions": hits, "laughs": laughs, "exclamations": excl,
+                                       "questions": questions, "words_per_s": round(rate, 2), "repeats": repeats}
+
+
+def speech_rerank(conn, settings: Settings, source_id: int, transcriber: Transcriber, *, top: int = 6) -> list[dict]:
+    """Listen to the strongest few windows and add a bonus for reactions, so the clip starts where people react."""
+    src = conn.execute("SELECT file_path FROM sources WHERE id = %s", (source_id,)).fetchone()
+    rows = conn.execute("""SELECT id, start_s, end_s FROM candidates WHERE source_id = %s AND status = 'new'
+                           ORDER BY signal_score DESC, id LIMIT %s""", (source_id, top)).fetchall()
+    out = []
+    for r in rows:
+        dur = r["end_s"] - r["start_s"]
+        segs = transcriber.transcribe(src["file_path"], start=r["start_s"], duration=dur)
+        bonus, detail = speech_score(segs, dur)
+        text = " ".join(s.text for s in segs).strip() or None
+        conn.execute("UPDATE candidates SET signal_score = signal_score + %s, transcript = COALESCE(%s, transcript) "
+                     "WHERE id = %s", (bonus, text, r["id"]))
+        out.append({"candidate_id": r["id"], "bonus": bonus, **detail})
+    return out
+
+
 def candidate_windows(duration: float, cuts: list[float], peaks: list[tuple[float, float]], *,
                       length_s: float = 20.0, lead_s: float = 3.0, min_len_s: float = 6.0) -> list[dict]:
     """Build candidate windows around loudness peaks and scene cuts, scored by signal density."""
@@ -161,9 +210,14 @@ def extract(conn, settings: Settings, source_id: int, transcriber: Transcriber |
             "INSERT INTO candidates (source_id, start_s, end_s, signal_score, transcript) VALUES (%s, %s, %s, %s, %s)",
             (source_id, w["start_s"], w["end_s"], w["signal_score"], text or None),
         )
-    signals = {"scene_cuts": cuts, "loudness_peaks": peaks,
+    speech = []
+    if settings.transcriber == "whisper" and settings.speech_rerank_top > 0 and not segments and len(windows) > 1:
+        speech = speech_rerank(conn, settings, source_id, make_transcriber(settings) if isinstance(
+            transcriber, NullTranscriber) else transcriber, top=settings.speech_rerank_top)
+    signals = {"scene_cuts": cuts, "loudness_peaks": peaks, "speech": speech,
                "transcript": [{"start": s.start, "end": s.end, "text": s.text} for s in segments], "windows": len(windows)}
     conn.execute("UPDATE sources SET status = 'analysed', signals = %s WHERE id = %s", (db.Jsonb(signals), source_id))
     db.log_event(conn, "signals", "source", source_id, "analysed", {"windows": len(windows)})
     conn.commit()
-    return {"source_id": source_id, "scene_cuts": len(cuts), "peaks": len(peaks), "candidates": len(windows)}
+    return {"source_id": source_id, "scene_cuts": len(cuts), "peaks": len(peaks), "candidates": len(windows),
+            "speech_checked": len(speech)}

@@ -42,6 +42,8 @@ class Settings:
     captions: str = field(default_factory=lambda: _env("VICEPULSE_CAPTIONS", "auto"))
     # transcribe whole videos during signal extraction (slow for long files); captions only need the clip
     transcribe_full: bool = field(default_factory=lambda: _env("VICEPULSE_TRANSCRIBE_FULL", "0") == "1")
+    # with Whisper on: how many of the strongest windows to listen to when picking the moment (0 = off)
+    speech_rerank_top: int = field(default_factory=lambda: int(_env("VICEPULSE_SPEECH_RERANK_TOP", "6")))
     voice_mode: str = field(default_factory=lambda: _env("VICEPULSE_VOICE_MODE", "own"))
     voice_dir: Path = field(default_factory=lambda: Path(_env("VICEPULSE_VOICE_DIR", str(PACKAGE_ROOT / "data" / "voice"))))
     public_media_base_url: str = field(default_factory=lambda: _env("VICEPULSE_PUBLIC_MEDIA_BASE_URL"))
