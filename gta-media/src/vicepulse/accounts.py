@@ -72,6 +72,27 @@ def save_youtube_client(data_dir: Path, client_id: str, client_secret: str) -> N
     save(data_dir, "youtube_client", {"client_id": client_id, "client_secret": client_secret})
 
 
+def import_google_client_json(data_dir: Path, path: str | Path, redirect_uri: str) -> dict:
+    """Save the client from the JSON file Google Cloud lets you download; returns a summary without secrets."""
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as e:
+        raise ValueError(f"could not read the Google client file: {e}") from e
+    kind = "web" if "web" in raw else "installed" if "installed" in raw else None
+    if kind is None:
+        raise ValueError("this is not a Google OAuth client file (expected a 'web' section)")
+    if kind == "installed":
+        raise ValueError("this client is the 'Desktop app' type; create a 'Web application' client instead, "
+                         f"with the redirect URI {redirect_uri}")
+    c = raw[kind]
+    save_youtube_client(data_dir, c.get("client_id", ""), c.get("client_secret", ""))
+    uris = c.get("redirect_uris") or []
+    cid = c["client_id"]
+    return {"saved": True, "client_type": kind, "client_id": cid[:6] + "..." + cid[-28:],
+            "project_id": c.get("project_id"), "redirect_uri_ok": redirect_uri in uris,
+            "redirect_uri_expected": redirect_uri, "redirect_uris_in_file": uris}
+
+
 def youtube_auth_url(data_dir: Path, redirect_uri: str, state: str) -> str:
     cid, _ = youtube_client(data_dir)
     if not cid:

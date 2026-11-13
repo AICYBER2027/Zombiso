@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import date, datetime, timezone
 
@@ -107,6 +108,15 @@ def cmd_highlight(a, s, conn):
     return autosource.highlight(conn, s, make_llm(s), a.file, rights=a.rights, channel=a.channel,
                                 clip_seconds=a.clip_seconds, licence=a.licence, author=a.author, url=a.url,
                                 creator=a.creator)
+
+
+def cmd_youtube_client(a, s, conn):
+    from . import accounts
+
+    url = (os.environ.get("VICEPULSE_REVIEW_URL") or "http://localhost:8090").rstrip("/")
+    out = accounts.import_google_client_json(s.data_dir, a.json_file, f"{url}/oauth/youtube/callback")
+    out["live_publishing"] = "on" if s.allow_live_publish else "off"
+    return out
 
 
 def cmd_autoclip(a, s, conn):
@@ -282,6 +292,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--layout", default="auto", choices=["auto", "crop", "blur"])
     sp = add("check", cmd_check, "final policy and quality check, then queue for approval")
     sp.add_argument("--clips")
+    sp = add("youtube-client", cmd_youtube_client,
+             "save the Google OAuth client from its downloaded JSON file (secret is stored, never printed)")
+    sp.add_argument("--json-file", required=True)
     sp = add("highlight", cmd_highlight, "one subtitled vertical highlight from one file you point at (no publishing)")
     sp.add_argument("--file", required=True)
     sp.add_argument("--rights", required=True, choices=["own", "cc", "permission"])

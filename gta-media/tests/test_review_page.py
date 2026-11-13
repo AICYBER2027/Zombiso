@@ -138,3 +138,24 @@ def test_connect_youtube_from_the_page(settings, conn, server, monkeypatch):
     pub = make_publisher("youtube", "en")
     assert pub.refresh_token == "RT-secret-123" and pub.client_id == "123-abc.apps.googleusercontent.com"
     assert conn.execute("SELECT count(*) AS n FROM publish_jobs").fetchone()["n"] == 0
+
+
+def test_import_client_json_never_prints_the_secret(settings, conn, monkeypatch, capsys, tmp_path):
+    from vicepulse import accounts, cli
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.delenv("YOUTUBE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("YOUTUBE_CLIENT_SECRET", raising=False)
+    f = tmp_path / "client_secret_123.json"
+    f.write_text(json.dumps({"web": {"client_id": "123456789-abcdefgh.apps.googleusercontent.com", "project_id": "vp",
+                                     "client_secret": "GOCSPX-top-secret-value",
+                                     "redirect_uris": ["http://localhost:8090/oauth/youtube/callback"]}}))
+    assert cli.main(["youtube-client", "--json-file", str(f)]) == 0
+    printed = capsys.readouterr().out
+    out = json.loads(printed)
+    assert out["saved"] and out["redirect_uri_ok"] and out["live_publishing"] == "off"
+    assert "GOCSPX-top-secret-value" not in printed
+    assert accounts.youtube_client(settings.data_dir) == ("123456789-abcdefgh.apps.googleusercontent.com",
+                                                          "GOCSPX-top-secret-value")
+    f.write_text(json.dumps({"installed": {"client_id": "x.apps.googleusercontent.com", "client_secret": "y" * 20}}))
+    assert cli.main(["youtube-client", "--json-file", str(f)]) == 1
+    assert "Web application" in capsys.readouterr().err
