@@ -174,9 +174,11 @@ class CountingTranscriber:
 
     def transcribe(self, path, start=None, duration=None):
         CountingTranscriber.n += 1
-        lines = [["Welcome", "to", "the", "farm", "house."], ["The", "rocket", "launch", "starts", "now."],
-                 ["Cats", "sleep", "all", "day", "long."], ["Rain", "falls", "on", "quiet", "streets."]]
-        words = lines[CountingTranscriber.n % len(lines)]
+        n = CountingTranscriber.n
+        pool = ("apple bridge canyon dolphin engine forest guitar harbor island jungle kettle lantern meadow "
+                "nickel orbit pepper quartz rocket saddle tunnel umbrella velvet walnut yacht zebra anchor bamboo "
+                "cactus desert ember falcon glacier hammer igloo jacket koala lemon marble needle oyster").split()
+        words = [pool[(n * 5 + i) % len(pool)] for i in range(5)]       # different speech for every clip
         return [Segment(1.0, 4.0, " ".join(words), [w(1 + i * 0.5, 1.4 + i * 0.5, t) for i, t in enumerate(words)])]
 
 
@@ -185,7 +187,7 @@ def test_mock_commentary_does_not_make_different_videos_duplicates(settings, con
     from vicepulse import autosource, signals
     from vicepulse.llm import MockLLM
     monkeypatch.setattr(signals, "make_transcriber", lambda s: CountingTranscriber())
-    s = dataclasses.replace(settings, transcriber="whisper")
+    s = dataclasses.replace(settings, transcriber="whisper", speech_rerank_top=0)   # this test is about duplicates
     a = make_footage(tmp_path / "a.mp4", patterns=["testsrc2", "smptebars"], seg_s=10)
     b = make_footage(tmp_path / "b.mp4", patterns=["mandelbrot", "rgbtestsrc"], seg_s=10)
     c = make_footage(tmp_path / "c.mp4", patterns=["pal75bars", "testsrc"], seg_s=10)
