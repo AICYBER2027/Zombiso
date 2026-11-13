@@ -25,6 +25,15 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 
 function Stop-With($msg) { Write-Host ""; Write-Host $msg -ForegroundColor Red; exit 1 }
 function Clean($text) { return ($text -replace '"', '').Trim() }
+# Windows PowerShell drops empty arguments, so every answer the pipeline needs must be filled in.
+function Ask-Required($prompt) {
+    for ($i = 0; $i -lt 3; $i++) {
+        $v = Clean (Read-Host $prompt)
+        if ($v) { return $v }
+        Write-Host "  This answer is needed - please type it." -ForegroundColor Yellow
+    }
+    Stop-With "Stopped: a required answer was left empty. Nothing was changed."
+}
 
 # ---- 1. the video -----------------------------------------------------------------------------
 if (-not $Path) {
@@ -67,14 +76,14 @@ $rightsArgs = @()
 switch ($answer) {
     "1" { $rightsArgs = @("--rights", "own") }
     "2" {
-        $lic = Clean (Read-Host "Licence name exactly as shown (for example CC BY 4.0)")
-        $author = Clean (Read-Host "Author to credit")
-        $url = Clean (Read-Host "Link to the licence or the file page")
+        $lic = Ask-Required "Licence name exactly as shown (for example CC BY 4.0)"
+        $author = Ask-Required "Author to credit"
+        $url = Ask-Required "Link to the licence or the file page"
         $rightsArgs = @("--rights", "cc", "--licence", $lic, "--author", $author, "--url", $url)
     }
     "3" {
-        $creator = Clean (Read-Host "Creator's name")
-        $url = Clean (Read-Host "Link to the written permission (message, email screenshot or document)")
+        $creator = Ask-Required "Creator's name"
+        $url = Ask-Required "Link to the written permission (message, email screenshot or document)"
         $rightsArgs = @("--rights", "permission", "--creator", $creator, "--url", $url)
     }
     default { Stop-With "Stopped: VicePulse only processes footage you own or are licensed to use. Nothing was changed." }
