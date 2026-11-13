@@ -343,6 +343,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--credit-text")
     add("discovery-run", cmd_discovery_run, "discover + monitor + permissions + rank (scheduled job)")
     sp = add("serve", None, "run the worker HTTP API that n8n calls")
+    sp = add("review", None, "run the local review page (approve/reject clips, authorize creators)")
+    sp.add_argument("--host", default="0.0.0.0")
+    sp.add_argument("--port", type=int, default=8090)
     return p
 
 
@@ -353,6 +356,11 @@ def run(argv: list[str], settings: Settings | None = None) -> dict:
         from .worker import serve
 
         serve(settings)
+        return {}
+    if args.command == "review":
+        from . import review
+
+        review.serve(settings, args.host, args.port)
         return {}
     conn = db.connect(settings)
     try:

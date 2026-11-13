@@ -73,6 +73,7 @@ services:
     # Scale for launch month:  docker compose up -d --scale n8n-worker=3
 
   vicepulse:
+    image: vicepulse-worker:local      # shared with the review service below
     build:
       context: .
       dockerfile: docker/Dockerfile.worker
@@ -102,6 +103,38 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
     # No "ports:" on purpose: the worker is reachable only inside this network.
+
+  # Review page on this PC only: http://localhost:8090  (approve/reject clips, authorize creators).
+  # Approving never publishes; publishing stays behind VICEPULSE_ALLOW_LIVE_PUBLISH.
+  review:
+    image: vicepulse-worker:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+      args:
+        WHISPER: ${VICEPULSE_BUILD_WHISPER:-0}
+    restart: unless-stopped
+    command: ["vicepulse", "review", "--port", "8090"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://vicepulse:${POSTGRES_PASSWORD}@postgres:5432/vicepulse
+      VICEPULSE_HOME: /app
+      VICEPULSE_DATA_DIR: /data
+      VICEPULSE_VOICE_DIR: /data/voice
+      VICEPULSE_CHANNELS_FILE: /app/config/channels.json
+      VICEPULSE_GAMES_FILE: /app/config/games.json
+    volumes:
+      - mediadata:/data
+    ports:
+      - "127.0.0.1:8090:8090"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      postgres: {condition: service_healthy}
 
 volumes:
   pgdata:
