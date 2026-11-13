@@ -166,3 +166,37 @@ def test_highlight_explains_a_duplicate_and_ignores_the_daily_cap(settings, conn
     [why] = out["why_no_clip"]
     assert why["note"] != "day already full"                             # a requested highlight is not capped
     assert any("same visuals" in r for f in why["filtered"] for r in f["reasons"])
+
+
+class CountingTranscriber:
+    """Different speech for every clip, like real videos."""
+    n = 0
+
+    def transcribe(self, path, start=None, duration=None):
+        CountingTranscriber.n += 1
+        lines = [["Welcome", "to", "the", "farm", "house."], ["The", "rocket", "launch", "starts", "now."],
+                 ["Cats", "sleep", "all", "day", "long."], ["Rain", "falls", "on", "quiet", "streets."]]
+        words = lines[CountingTranscriber.n % len(lines)]
+        return [Segment(1.0, 4.0, " ".join(words), [w(1 + i * 0.5, 1.4 + i * 0.5, t) for i, t in enumerate(words)])]
+
+
+def test_mock_commentary_does_not_make_different_videos_duplicates(settings, conn, tmp_path, monkeypatch):
+    from conftest import make_footage
+    from vicepulse import autosource, signals
+    from vicepulse.llm import MockLLM
+    monkeypatch.setattr(signals, "make_transcriber", lambda s: CountingTranscriber())
+    s = dataclasses.replace(settings, transcriber="whisper")
+    a = make_footage(tmp_path / "a.mp4", patterns=["testsrc2", "smptebars"], seg_s=10)
+    b = make_footage(tmp_path / "b.mp4", patterns=["mandelbrot", "rgbtestsrc"], seg_s=10)
+    c = make_footage(tmp_path / "c.mp4", patterns=["pal75bars", "testsrc"], seg_s=10)
+    outs = [autosource.highlight(conn, s, MockLLM(), f, rights="own", clip_seconds=15) for f in (a, b, c)]
+    assert [o["details"][0]["status"] for o in outs] == ["pending_approval"] * 3, outs
+
+    # a clip wrongly marked as a script duplicate by an older version gets another go on the next run
+    cid = outs[2]["clips"][0]
+    conn.execute("DELETE FROM renders WHERE clip_id = %s", (cid,))
+    conn.execute("UPDATE clips SET status = 'duplicate', status_reason = %s WHERE id = %s",
+                 ("script 82% similar to clip 1", cid))
+    conn.commit()
+    again = autosource.highlight(conn, s, MockLLM(), c, rights="own", clip_seconds=15)
+    assert again["clips"] == [cid] and again["details"][0]["status"] == "pending_approval" and again["finished_files"]

@@ -121,7 +121,11 @@ def write_scripts(conn, settings: Settings, llm: LLM, *, clip_ids: list[int] | N
             for copy in titles.values():
                 if clip["credit_text"] not in copy["description"]:
                     copy["description"] = f"{copy['description']}\n\n{clip['credit_text']}".strip()
-        text = " ".join([result["hook"], result["body"], result["closer"], titles["youtube"]["title"]])
+        spoken = " ".join(c["text"] for c in captions if c.get("kind") == "speech")
+        # With real-speech subtitles, compare what is said in the clip; the offline mock's commentary repeats
+        # a small set of lines, so comparing it would mark unrelated clips as duplicates.
+        text = spoken if spoken else " ".join([result["hook"], result["body"], result["closer"],
+                                                titles["youtube"]["title"]])
         dup = dedupe.check_script(conn, channel_id=clip["channel_id"], clip_id=clip["id"], script_text=text,
                                   angle=result["angle"])
         status = "duplicate" if dup.duplicate else "scripted"

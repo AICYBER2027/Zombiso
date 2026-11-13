@@ -208,18 +208,38 @@ def highlight(conn, settings: Settings, llm: LLM, path: str | Path, *, rights: s
         if done:
             return {"source_id": known["id"], "clips": [done["id"]], "already_done": True,
                     "finished_files": _export(conn, settings, [done["id"]], _safe_name(path.stem))}
+        # Earlier versions compared the mock's repeating commentary and wrongly marked clips as duplicates.
+        # Give such a clip another go with the current check (the record is updated, nothing is deleted).
+        retry = conn.execute("""SELECT cl.id FROM clips cl JOIN candidates c ON c.id = cl.candidate_id
+                                JOIN channels ch ON ch.id = cl.channel_id
+                                WHERE c.source_id = %s AND ch.key = %s AND cl.status = 'duplicate'
+                                  AND cl.status_reason LIKE 'script %%' ORDER BY cl.id DESC LIMIT 1""",
+                             (known["id"], channel)).fetchone()
+        if retry:
+            conn.execute("UPDATE clips SET status = 'selected', status_reason = NULL WHERE id = %s", (retry["id"],))
+            db.log_event(conn, "highlight", "clip", retry["id"], "retry", {"why": "script duplicate check changed"})
+            conn.commit()
+            ids = [retry["id"]]
+            commentary.write_scripts(conn, settings, llm, clip_ids=ids)
+            render.render_pending(conn, settings, clip_ids=ids)
+            policy.final_check(conn, settings, llm, clip_ids=ids)
+            return _highlight_result(conn, settings, known["id"], ids, [], path)
     rid = rights_for_file(conn, rights, licence=licence, author=author, url=url, creator=creator)
     conn.commit()
     res = ingest.ingest_file(conn, settings, path, origin="own_recording" if rights == "own" else "creator_upload",
                              rights_id=rid)
-    if res["status"] != "cleared":
+    if res["status"] not in ("cleared", "analysed"):
         return {"source_id": res["source_id"], "clips": [], "finished_files": [], "refused": res.get("reasons")}
     why: list = []
     ids = _clip_and_render(conn, settings, llm, res["source_id"], channels=[channel], clip_seconds=clip_seconds,
                            max_clips=1, why=why, ignore_day_limit=True)
+    return _highlight_result(conn, settings, res["source_id"], ids, why, path)
+
+
+def _highlight_result(conn, settings: Settings, source_id: int, ids: list[int], why: list, path: Path) -> dict:
     clips = conn.execute("SELECT id, status, status_reason, in_s, out_s, script FROM clips WHERE id = ANY(%s)",
                          (ids,)).fetchall()
-    return {"source_id": res["source_id"], "clips": ids, "already_done": False, "why_no_clip": why,
+    return {"source_id": source_id, "clips": ids, "already_done": False, "why_no_clip": why,
             "details": [{"clip": c["id"], "status": c["status"], "reason": c["status_reason"],
                          "from_s": c["in_s"], "to_s": c["out_s"],
                          "subtitles": (c["script"] or {}).get("caption_source"),
