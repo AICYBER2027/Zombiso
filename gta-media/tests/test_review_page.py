@@ -23,7 +23,7 @@ def made_clip(settings, conn, footage, monkeypatch, capsys):
 def server(settings):
     httpd = review.make_server(settings, "127.0.0.1", 0)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{httpd.server_address[1]}", httpd.RequestHandlerClass
+    yield f"http://127.0.0.1:{httpd.server_address[1]}", httpd.app
     httpd.shutdown()
 
 
@@ -79,3 +79,62 @@ def test_authorize_creator_from_the_page(settings, conn, server):
     rl = conn.execute("SELECT * FROM rights_ledger WHERE id = %s", (cr["rights_id"],)).fetchone()
     assert rl["licence_type"] == "creator_permission" and rl["derivative_edits_allowed"] and rl["monetisation_allowed"]
     assert rl["document_url"] == "https://drive.example/proof.png"
+
+
+class FakeGoogle:
+    def __init__(self):
+        self.posts = []
+
+    def post(self, url, data=None, timeout=None):
+        self.posts.append((url, data))
+        r = requests.Response()
+        r.status_code, r._content = 200, json.dumps({"access_token": "AT", "refresh_token": "RT-secret-123"}).encode()
+        return r
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        assert headers["Authorization"] == "Bearer AT" and params["mine"] == "true"
+        r = requests.Response()
+        r.status_code, r._content = 200, json.dumps(
+            {"items": [{"id": "UCvicepulseEN", "snippet": {"title": "VicePulse EN"}}]}).encode()
+        return r
+
+
+def test_connect_youtube_from_the_page(settings, conn, server, monkeypatch):
+    import os
+    from urllib.parse import parse_qs as pq, urlparse as up
+    from vicepulse import accounts
+    from vicepulse.platforms import make_publisher
+    base, httpd_app = server
+    monkeypatch.delenv("YOUTUBE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("YOUTUBE_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("YOUTUBE_REFRESH_TOKEN_EN", raising=False)
+    httpd_app.http = FakeGoogle()
+
+    page = requests.get(base + "/accounts").text
+    assert "Step 1" in page and "http://localhost:8090/oauth/youtube/callback" in page
+    t = token(page)
+    r = requests.post(base + "/accounts/youtube-client", data={"csrf": t, "client_id": "nope", "client_secret": "x" * 20})
+    assert "does not look like a Google OAuth client ID" in r.text
+    r = requests.post(base + "/accounts/youtube-client",
+                      data={"csrf": t, "client_id": "123-abc.apps.googleusercontent.com", "client_secret": "GOCSPX-shh-secret"})
+    assert "saved" in r.text and "GOCSPX-shh-secret" not in r.text and "Connect YouTube" in r.text
+
+    r = requests.post(base + "/accounts/youtube-start", data={"csrf": t, "channel": "en"}, allow_redirects=False)
+    assert r.status_code == 303
+    loc = up(r.headers["Location"])
+    q = {k: v[0] for k, v in pq(loc.query).items()}
+    assert loc.netloc == "accounts.google.com" and q["access_type"] == "offline"
+    assert q["redirect_uri"] == "http://localhost:8090/oauth/youtube/callback" and "youtube.upload" in q["scope"]
+
+    assert "expired" in requests.get(base + "/oauth/youtube/callback", params={"state": "forged", "code": "c"}).text
+    r = requests.get(base + "/oauth/youtube/callback", params={"state": q["state"], "code": "the-code"})
+    assert "YouTube connected for EN: VicePulse EN" in r.text and "RT-secret-123" not in r.text
+    assert httpd_app.http.posts[0][1]["code"] == "the-code"
+
+    f = settings.data_dir / "secrets" / "youtube_en.json"
+    assert oct(os.stat(f).st_mode & 0o777) == "0o600"
+    assert accounts.youtube_refresh_token(settings.data_dir, "en") == "RT-secret-123"
+    monkeypatch.setenv("VICEPULSE_DATA_DIR", str(settings.data_dir))
+    pub = make_publisher("youtube", "en")
+    assert pub.refresh_token == "RT-secret-123" and pub.client_id == "123-abc.apps.googleusercontent.com"
+    assert conn.execute("SELECT count(*) AS n FROM publish_jobs").fetchone()["n"] == 0

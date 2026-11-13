@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import db, discovery, policy
+from . import accounts, db, discovery, policy
 from .config import Settings
 
 REVIEWER = "owner (review page)"
@@ -36,6 +36,7 @@ form.row{display:flex;gap:8px;flex-wrap:wrap}input[type=text],input[type=url]{fl
 border:1px solid var(--line);background:#0c0e12;color:var(--text)}button{padding:8px 14px;border:0;border-radius:8px;font-weight:600;cursor:pointer}
 .approve{background:var(--ok);color:#04150b}.reject{background:var(--no);color:#fff}.plain{background:#2a2f3a;color:var(--text)}
 .msg{padding:10px 14px;border-radius:8px;background:#1d2a20;border:1px solid #2f5a3d;margin-bottom:16px}
+code{background:#0c0e12;border:1px solid var(--line);padding:2px 6px;border-radius:6px;word-break:break-all}
 .err{background:#2a1d1d;border-color:#5a2f2f}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid var(--line);
 text-align:left;vertical-align:top;font-size:14px}th{color:var(--muted);font-weight:500}.empty{color:var(--muted);padding:40px;text-align:center}
 """
@@ -46,16 +47,23 @@ def e(v) -> str:
 
 
 class ReviewApp:
-    def __init__(self, settings: Settings, token: str | None = None):
+    def __init__(self, settings: Settings, token: str | None = None, public_url: str | None = None):
         self.settings = settings
         self.token = token or secrets.token_urlsafe(24)
+        # The address you open in the browser; Google sends you back here after signing in.
+        self.public_url = (public_url or os.environ.get("VICEPULSE_REVIEW_URL") or "http://localhost:8090").rstrip("/")
+        self.oauth_states: dict[str, str] = {}
+
+    @property
+    def youtube_redirect(self) -> str:
+        return f"{self.public_url}/oauth/youtube/callback"
 
     # ------------------------------------------------------------------ pages
     def page(self, title: str, body: str, tab: str, msg: str = "", err: bool = False) -> str:
         s = self.settings
         tabs = "".join(f'<a href="{href}" class="{"on" if key == tab else ""}">{label}</a>'
                        for key, href, label in (("pending", "/", "Waiting for review"), ("done", "/done", "Reviewed"),
-                                                ("creators", "/creators", "Creators")))
+                                                ("creators", "/creators", "Creators"), ("accounts", "/accounts", "Accounts")))
         safe = (f'AI: {e(s.llm_mode)} &middot; live publishing: {"ON" if s.allow_live_publish else "off"}'
                 f' &middot; approval required: {"yes" if s.require_approval else "no"}')
         note = f'<div class="msg{" err" if err else ""}">{e(msg)}</div>' if msg else ""
@@ -136,6 +144,61 @@ class ReviewApp:
         out.append("</table>")
         return "".join(out)
 
+    def accounts_page(self) -> str:
+        st = accounts.status(self.settings)
+        csrf = f'<input type=hidden name=csrf value="{self.token}">'
+        out = ['<p class=meta>Connecting an account only lets VicePulse upload when publishing is switched on later. '
+               'Nothing is posted now. Logins are stored in VicePulse\'s own data folder and never shown here.</p>',
+               '<h3>YouTube</h3>']
+        if not st["youtube_client"]:
+            out.append(
+                '<div class=card><b>Step 1 - Google sign-in app</b><p class=meta>In Google Cloud Console, create an '
+                '<b>OAuth client ID</b> of type <b>Web application</b> and add this exact address under '
+                f'<b>Authorized redirect URIs</b>:</p><p><code>{e(self.youtube_redirect)}</code></p>'
+                '<p class=meta>Then paste the client ID and client secret here:</p>'
+                f'<form class=row method=post action="/accounts/youtube-client">{csrf}'
+                '<input type=text name=client_id placeholder="Client ID (...apps.googleusercontent.com)" required>'
+                '<input type=text name=client_secret placeholder="Client secret" required autocomplete=off>'
+                '<button class=approve>Save</button></form></div>')
+        else:
+            src = ".env" if st["youtube_client_from_env"] else "saved here"
+            out.append(f'<p class=meta>Google sign-in app: ready ({src}). Redirect address: '
+                       f'<code>{e(self.youtube_redirect)}</code></p>')
+        rows = ['<table><tr><th>VicePulse channel</th><th>YouTube channel</th><th></th></tr>']
+        for key, y in st["youtube"].items():
+            who = (f'connected: <b>{e(y["channel_title"])}</b>' if y["connected"] else "not connected")
+            btn = ""
+            if st["youtube_client"]:
+                label = "Reconnect" if y["connected"] else "Connect YouTube"
+                btn = (f'<form method=post action="/accounts/youtube-start">{csrf}<input type=hidden name=channel '
+                       f'value="{e(key)}"><button class={"plain" if y["connected"] else "approve"}>{label}</button></form>')
+            rows.append(f'<tr><td><b>{e(y["name"])}</b> <span class=tag>{e(key).upper()}</span></td><td>{who}</td><td>{btn}</td></tr>')
+        rows.append("</table>")
+        out.append("".join(rows))
+        out.append('<p class=meta>Sign in with the Google account that owns the right channel: the EN channel for '
+                   'VicePulse EN and the BR channel for VicePulse BR. If one Google account owns both, Google asks '
+                   'which channel to use.</p>')
+        out.append('<h3>Instagram and TikTok</h3><p class=meta>Coming next.</p>')
+        return "".join(out)
+
+    def youtube_start(self, form: dict) -> str:
+        channel = form.get("channel", "")
+        if channel not in {c["key"] for c in self.settings.channels()}:
+            raise ValueError("unknown channel")
+        state = secrets.token_urlsafe(24)
+        self.oauth_states[state] = channel
+        return accounts.youtube_auth_url(self.settings.data_dir, self.youtube_redirect, state)
+
+    def youtube_callback(self, q: dict, session=None) -> str:
+        if q.get("error"):
+            raise ValueError(f"Google sign-in was cancelled ({q['error']})")
+        channel = self.oauth_states.pop(q.get("state", ""), None)
+        if channel is None:
+            raise ValueError("this sign-in link expired; press Connect again")
+        info = accounts.youtube_connect(self.settings.data_dir, channel, q.get("code", ""), self.youtube_redirect,
+                                        session=session)
+        return f"YouTube connected for {channel.upper()}: {info['channel_title']}. Nothing was published."
+
     # ------------------------------------------------------------------ actions
     def decide(self, conn, form: dict) -> str:
         clip = int(form["clip"])
@@ -184,6 +247,13 @@ def make_handler(app: ReviewApp):
                 return self._media(url.path)
             if url.path == "/healthz":
                 return self._send(200, b"ok", "text/plain")
+            if url.path == "/oauth/youtube/callback":
+                from urllib.parse import quote
+                try:
+                    done = app.youtube_callback({k: v[0] for k, v in q.items()}, session=getattr(app, "http", None))
+                    return self._redirect(f"/accounts?msg={quote(done)}")
+                except (ValueError, KeyError, OSError) as ex:
+                    return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
             pages = {"/": ("Waiting for review", "pending", ("pending_approval",), True),
                      "/done": ("Reviewed", "done", ("approved", "rejected", "scheduled", "published"), False)}
             with db.connect(app.settings) as conn:
@@ -192,6 +262,8 @@ def make_handler(app: ReviewApp):
                     body = app.page(title, app.clip_cards(conn, statuses, act), tab, msg, err)
                 elif url.path == "/creators":
                     body = app.page("Creators", app.creators_page(conn), "creators", msg, err)
+                elif url.path == "/accounts":
+                    body = app.page("Accounts", app.accounts_page(), "accounts", msg, err)
                 else:
                     return self._send(404, b"not found", "text/plain")
             self._send(200, body.encode())
@@ -208,10 +280,23 @@ def make_handler(app: ReviewApp):
             form = {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode("utf-8", "replace")).items()}
             if not secrets.compare_digest(form.get("csrf", ""), app.token):
                 return self._send(403, b"form expired - reload the page", "text/plain")
-            back = {"/decide": "/", "/authorize": "/creators"}.get(urlparse(self.path).path)
+            path = urlparse(self.path).path
+            from urllib.parse import quote
+            if path == "/accounts/youtube-client":
+                try:
+                    accounts.save_youtube_client(app.settings.data_dir, form.get("client_id", ""),
+                                                 form.get("client_secret", ""))
+                    return self._redirect("/accounts?msg=" + quote("Google sign-in app saved. Now press Connect YouTube."))
+                except ValueError as ex:
+                    return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
+            if path == "/accounts/youtube-start":
+                try:
+                    return self._redirect(app.youtube_start(form))
+                except ValueError as ex:
+                    return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
+            back = {"/decide": "/", "/authorize": "/creators"}.get(path)
             if back is None:
                 return self._send(404, b"not found", "text/plain")
-            from urllib.parse import quote
             try:
                 with db.connect(app.settings) as conn:
                     msg = app.decide(conn, form) if back == "/" else app.authorize(conn, form)
@@ -270,8 +355,12 @@ def make_handler(app: ReviewApp):
     return Handler
 
 
-def make_server(settings: Settings, host: str = "0.0.0.0", port: int = 8090) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((host, port), make_handler(ReviewApp(settings)))
+def make_server(settings: Settings, host: str = "0.0.0.0", port: int = 8090,
+                app: ReviewApp | None = None) -> ThreadingHTTPServer:
+    app = app or ReviewApp(settings)
+    httpd = ThreadingHTTPServer((host, port), make_handler(app))
+    httpd.app = app
+    return httpd
 
 
 def serve(settings: Settings, host: str = "0.0.0.0", port: int = 8090) -> None:

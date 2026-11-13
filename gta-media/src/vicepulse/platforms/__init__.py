@@ -14,9 +14,15 @@ from .youtube import YouTubePublisher
 def make_publisher(platform: str, channel_key: str, *, audited: bool = False) -> Publisher:
     """Build the real client for one channel's account. Raises PlatformError if it is not configured."""
     if platform == "youtube":
-        return YouTubePublisher(client_id=os.environ.get("YOUTUBE_CLIENT_ID", ""),
-                                client_secret=os.environ.get("YOUTUBE_CLIENT_SECRET", ""),
-                                refresh_token=platform_secret("youtube", channel_key, "refresh_token"),
+        # .env values win; otherwise the account connected from the review page (stored in the data volume).
+        from .. import accounts
+        from ..config import Settings
+
+        data_dir = Settings().data_dir
+        client_id, client_secret = accounts.youtube_client(data_dir)
+        return YouTubePublisher(client_id=client_id, client_secret=client_secret,
+                                refresh_token=platform_secret("youtube", channel_key, "refresh_token")
+                                or accounts.youtube_refresh_token(data_dir, channel_key),
                                 audited=audited)
     if platform == "instagram":
         return InstagramPublisher(user_id=platform_secret("instagram", channel_key, "user_id"),
