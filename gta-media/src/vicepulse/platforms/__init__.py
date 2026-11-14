@@ -25,8 +25,14 @@ def make_publisher(platform: str, channel_key: str, *, audited: bool = False) ->
                                 or accounts.youtube_refresh_token(data_dir, channel_key),
                                 audited=audited)
     if platform == "instagram":
-        return InstagramPublisher(user_id=platform_secret("instagram", channel_key, "user_id"),
-                                  access_token=platform_secret("instagram", channel_key, "access_token"))
+        user_id = platform_secret("instagram", channel_key, "user_id")
+        token = platform_secret("instagram", channel_key, "access_token")
+        if not (user_id and token):
+            from .. import accounts
+            from ..config import Settings
+
+            user_id, token = accounts.instagram_credentials(Settings().data_dir, channel_key)
+        return InstagramPublisher(user_id=user_id, access_token=token)
     if platform == "tiktok":
         return TikTokPublisher(access_token=platform_secret("tiktok", channel_key, "access_token"), audited=audited)
     raise PlatformError(f"unknown platform {platform}")

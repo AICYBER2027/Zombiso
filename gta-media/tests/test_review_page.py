@@ -159,3 +159,87 @@ def test_import_client_json_never_prints_the_secret(settings, conn, monkeypatch,
     f.write_text(json.dumps({"installed": {"client_id": "x.apps.googleusercontent.com", "client_secret": "y" * 20}}))
     assert cli.main(["youtube-client", "--json-file", str(f)]) == 1
     assert "Web application" in capsys.readouterr().err
+
+
+class FakeInstagram:
+    def __init__(self, account_type="BUSINESS", username="vicepulse.en"):
+        self.calls, self.account_type, self.username = [], account_type, username
+
+    def _resp(self, body, code=200):
+        r = requests.Response()
+        r.status_code, r._content = code, json.dumps(body).encode()
+        return r
+
+    def post(self, url, data=None, timeout=None):
+        self.calls.append(("post", url, dict(data)))
+        return self._resp({"data": [{"access_token": "IG-SHORT", "user_id": "1789",
+                                     "permissions": "instagram_business_basic,instagram_business_content_publish"}]})
+
+    def get(self, url, params=None, timeout=None):
+        self.calls.append(("get", url, dict(params)))
+        if url.endswith("/access_token"):
+            assert params["grant_type"] == "ig_exchange_token" and params["access_token"] == "IG-SHORT"
+            return self._resp({"access_token": "IG-LONG-secret", "token_type": "bearer", "expires_in": 5184000})
+        if url.endswith("/refresh_access_token"):
+            return self._resp({"access_token": "IG-REFRESHED", "expires_in": 5184000})
+        assert params["access_token"] == "IG-LONG-secret"
+        return self._resp({"user_id": "17841400000000001", "username": self.username, "account_type": self.account_type})
+
+
+def test_connect_instagram_direct_and_pasted(settings, conn, server, monkeypatch):
+    from urllib.parse import parse_qs as pq, urlparse as up
+    from vicepulse import accounts
+    from vicepulse.platforms import make_publisher
+    base, app = server
+    for v in ("INSTAGRAM_APP_ID", "INSTAGRAM_APP_SECRET", "INSTAGRAM_USER_ID_EN", "INSTAGRAM_ACCESS_TOKEN_EN"):
+        monkeypatch.delenv(v, raising=False)
+    app.http = FakeInstagram()
+    page = requests.get(base + "/accounts").text
+    assert "http://localhost:8090/oauth/instagram/callback" in page and "Instagram app ID" in page
+    t = token(page)
+    assert "is a number" in requests.post(base + "/accounts/instagram-client",
+                                          data={"csrf": t, "app_id": "abc", "app_secret": "a" * 32}).text
+    r = requests.post(base + "/accounts/instagram-client",
+                      data={"csrf": t, "app_id": "1234567890", "app_secret": "0123456789abcdef0123456789abcdef"})
+    assert "Instagram app saved" in r.text and "0123456789abcdef0123456789abcdef" not in r.text
+
+    r = requests.post(base + "/accounts/instagram-start", data={"csrf": t, "channel": "en"}, allow_redirects=False)
+    loc = up(r.headers["Location"])
+    q = {k: v[0] for k, v in pq(loc.query).items()}
+    assert loc.netloc == "www.instagram.com" and loc.path == "/oauth/authorize" and q["client_id"] == "1234567890"
+    assert "instagram_business_content_publish" in q["scope"] and q["redirect_uri"].endswith("/oauth/instagram/callback")
+
+    # direct return (code with Instagram's trailing #_ is cleaned)
+    r = requests.get(base + "/oauth/instagram/callback", params={"state": q["state"], "code": "AQD-code#_"})
+    assert "Instagram connected for EN: @vicepulse.en" in r.text and "IG-LONG-secret" not in r.text
+    post = [c for c in app.http.calls if c[0] == "post"][0][2]
+    assert post["code"] == "AQD-code" and post["redirect_uri"] == "http://localhost:8090/oauth/instagram/callback"
+    assert accounts.instagram_credentials(settings.data_dir, "en") == ("17841400000000001", "IG-LONG-secret")
+    monkeypatch.setenv("VICEPULSE_DATA_DIR", str(settings.data_dir))
+    pub = make_publisher("instagram", "en")
+    assert (pub.user_id, pub.token) == ("17841400000000001", "IG-LONG-secret")
+
+    # pasted address (when Meta requires an https redirect the browser cannot open)
+    r = requests.post(base + "/accounts/instagram-start", data={"csrf": t, "channel": "br"}, allow_redirects=False)
+    st = pq(up(r.headers["Location"]).query)["state"][0]
+    app.http.username = "vicepulse.br"
+    r = requests.post(base + "/accounts/instagram-paste", data={
+        "csrf": t, "url": f"https://localhost:8090/oauth/instagram/callback?code=XYZ&state={st}#_"})
+    assert "Instagram connected for BR: @vicepulse.br" in r.text
+    assert "no sign-in code" in requests.post(base + "/accounts/instagram-paste",
+                                              data={"csrf": t, "url": "https://example.com/"}).text
+    assert conn.execute("SELECT count(*) AS n FROM publish_jobs").fetchone()["n"] == 0
+
+
+def test_instagram_personal_account_refused_and_token_refresh(settings):
+    import time as _t
+    from vicepulse import accounts
+    accounts.save_instagram_client(settings.data_dir, "1234567890", "0123456789abcdef0123456789abcdef")
+    with pytest.raises(ValueError, match="personal account"):
+        accounts.instagram_connect(settings.data_dir, "en", "c", "http://localhost:8090/oauth/instagram/callback",
+                                   session=FakeInstagram(account_type="PERSONAL"))
+    info = {"access_token": "IG-OLD", "user_id": "1", "expires_at": int(_t.time()) + 5 * 86400,
+            "connected_at": int(_t.time()) - 50 * 86400}
+    accounts.save(settings.data_dir, "instagram_en", info)
+    assert accounts.instagram_credentials(settings.data_dir, "en", session=FakeInstagram()) == ("1", "IG-REFRESHED")
+    assert accounts.load(settings.data_dir, "instagram_en")["expires_at"] > int(_t.time()) + 50 * 86400

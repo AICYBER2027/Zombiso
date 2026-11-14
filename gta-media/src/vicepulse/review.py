@@ -58,6 +58,12 @@ class ReviewApp:
     def youtube_redirect(self) -> str:
         return f"{self.public_url}/oauth/youtube/callback"
 
+    @property
+    def instagram_redirect(self) -> str:
+        # Meta may insist on https; then set VICEPULSE_INSTAGRAM_REDIRECT=https://localhost:8090/oauth/instagram/callback
+        # and paste the address from the browser after signing in.
+        return (os.environ.get("VICEPULSE_INSTAGRAM_REDIRECT") or f"{self.public_url}/oauth/instagram/callback").rstrip("/")
+
     # ------------------------------------------------------------------ pages
     def page(self, title: str, body: str, tab: str, msg: str = "", err: bool = False) -> str:
         s = self.settings
@@ -178,23 +184,81 @@ class ReviewApp:
         out.append('<p class=meta>Sign in with the Google account that owns the right channel: the EN channel for '
                    'VicePulse EN and the BR channel for VicePulse BR. If one Google account owns both, Google asks '
                    'which channel to use.</p>')
-        out.append('<h3>Instagram and TikTok</h3><p class=meta>Coming next.</p>')
+        out.append(self.instagram_section(st, csrf))
+        out.append('<h3>TikTok</h3><p class=meta>Coming next.</p>')
         return "".join(out)
+
+    def instagram_section(self, st: dict, csrf: str) -> str:
+        out = ['<h3>Instagram</h3>']
+        if not st["instagram_client"]:
+            out.append(
+                '<div class=card><b>Step 1 - Instagram app</b><p class=meta>In your Meta app: <b>Instagram &gt; API setup '
+                'with Instagram login &gt; Set up Instagram business login &gt; Business login settings</b>. Under '
+                f'<b>OAuth redirect URIs</b> add:</p><p><code>{e(self.instagram_redirect)}</code></p>'
+                '<p class=meta>Then copy the <b>Instagram app ID</b> and <b>Instagram app secret</b> from the same page '
+                '(not the Facebook app ID) and paste them here:</p>'
+                f'<form class=row method=post action="/accounts/instagram-client">{csrf}'
+                '<input type=text name=app_id placeholder="Instagram app ID" required>'
+                '<input type=text name=app_secret placeholder="Instagram app secret" required autocomplete=off>'
+                '<button class=approve>Save</button></form></div>')
+        else:
+            out.append(f'<p class=meta>Instagram app: ready. Redirect address: <code>{e(self.instagram_redirect)}</code></p>')
+        rows = ['<table><tr><th>VicePulse channel</th><th>Instagram account</th><th></th></tr>']
+        for key, ig in st["instagram"].items():
+            who = (f'connected: <b>@{e(ig["username"])}</b>' + (f' &middot; login renews automatically '
+                   f'({ig["days_left"]} days left)' if ig.get("days_left") is not None else "")) if ig["connected"] else "not connected"
+            btn = ""
+            if st["instagram_client"]:
+                label = "Reconnect" if ig["connected"] else "Connect Instagram"
+                btn = (f'<form method=post action="/accounts/instagram-start">{csrf}<input type=hidden name=channel '
+                       f'value="{e(key)}"><button class={"plain" if ig["connected"] else "approve"}>{label}</button></form>')
+            rows.append(f'<tr><td><b>{e(ig["name"])}</b> <span class=tag>{e(key).upper()}</span></td><td>{who}</td><td>{btn}</td></tr>')
+        rows.append("</table>")
+        out.append("".join(rows))
+        if st["instagram_client"]:
+            out.append(
+                '<p class=meta>Log in with the Instagram account for that channel (it must be a professional account). '
+                'If the browser shows an error page after you allow access, copy the whole address from the address '
+                'bar and paste it here:</p>'
+                f'<form class=row method=post action="/accounts/instagram-paste">{csrf}'
+                '<input type=text name=url placeholder="https://localhost:8090/oauth/instagram/callback?code=..." required>'
+                '<button class=plain>Finish connecting</button></form>')
+        return "".join(out)
+
+    def instagram_start(self, form: dict) -> str:
+        channel = form.get("channel", "")
+        if channel not in {c["key"] for c in self.settings.channels()}:
+            raise ValueError("unknown channel")
+        state = secrets.token_urlsafe(24)
+        self.oauth_states[state] = "instagram:" + channel
+        return accounts.instagram_auth_url(self.settings.data_dir, self.instagram_redirect, state)
+
+    def instagram_callback(self, q: dict, session=None) -> str:
+        if q.get("error"):
+            raise ValueError(f"Instagram sign-in was cancelled ({q.get('error_description') or q['error']})")
+        tagged = self.oauth_states.pop(q.get("state", ""), "")
+        if not tagged.startswith("instagram:"):
+            raise ValueError("this sign-in link expired; press Connect Instagram again")
+        channel = tagged.split(":", 1)[1]
+        info = accounts.instagram_connect(self.settings.data_dir, channel, q.get("code", ""), self.instagram_redirect,
+                                          session=session)
+        return f"Instagram connected for {channel.upper()}: @{info['username']}. Nothing was published."
 
     def youtube_start(self, form: dict) -> str:
         channel = form.get("channel", "")
         if channel not in {c["key"] for c in self.settings.channels()}:
             raise ValueError("unknown channel")
         state = secrets.token_urlsafe(24)
-        self.oauth_states[state] = channel
+        self.oauth_states[state] = "youtube:" + channel
         return accounts.youtube_auth_url(self.settings.data_dir, self.youtube_redirect, state)
 
     def youtube_callback(self, q: dict, session=None) -> str:
         if q.get("error"):
             raise ValueError(f"Google sign-in was cancelled ({q['error']})")
-        channel = self.oauth_states.pop(q.get("state", ""), None)
-        if channel is None:
+        tagged = self.oauth_states.pop(q.get("state", ""), "")
+        if not tagged.startswith("youtube:"):
             raise ValueError("this sign-in link expired; press Connect again")
+        channel = tagged.split(":", 1)[1]
         info = accounts.youtube_connect(self.settings.data_dir, channel, q.get("code", ""), self.youtube_redirect,
                                         session=session)
         return f"YouTube connected for {channel.upper()}: {info['channel_title']}. Nothing was published."
@@ -247,6 +311,13 @@ def make_handler(app: ReviewApp):
                 return self._media(url.path)
             if url.path == "/healthz":
                 return self._send(200, b"ok", "text/plain")
+            if url.path == "/oauth/instagram/callback":
+                from urllib.parse import quote
+                try:
+                    done = app.instagram_callback({k: v[0] for k, v in q.items()}, session=getattr(app, "http", None))
+                    return self._redirect(f"/accounts?msg={quote(done)}")
+                except (ValueError, KeyError, OSError) as ex:
+                    return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
             if url.path == "/oauth/youtube/callback":
                 from urllib.parse import quote
                 try:
@@ -288,6 +359,19 @@ def make_handler(app: ReviewApp):
                                                  form.get("client_secret", ""))
                     return self._redirect("/accounts?msg=" + quote("Google sign-in app saved. Now press Connect YouTube."))
                 except ValueError as ex:
+                    return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
+            if path in ("/accounts/instagram-client", "/accounts/instagram-start", "/accounts/instagram-paste"):
+                try:
+                    if path == "/accounts/instagram-client":
+                        accounts.save_instagram_client(app.settings.data_dir, form.get("app_id", ""),
+                                                       form.get("app_secret", ""))
+                        return self._redirect("/accounts?msg=" + quote("Instagram app saved. Now press Connect Instagram."))
+                    if path == "/accounts/instagram-start":
+                        return self._redirect(app.instagram_start(form))
+                    done = app.instagram_callback(accounts.code_from_pasted_url(form.get("url", "")),
+                                                  session=getattr(app, "http", None))
+                    return self._redirect(f"/accounts?msg={quote(done)}")
+                except (ValueError, KeyError, OSError) as ex:
                     return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
             if path == "/accounts/youtube-start":
                 try:

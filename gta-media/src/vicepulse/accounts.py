@@ -135,11 +135,128 @@ def status(settings: Settings) -> dict:
     cid, sec = youtube_client(settings.data_dir)
     out = {"youtube_client": bool(cid and sec),
            "youtube_client_from_env": bool(os.environ.get("YOUTUBE_CLIENT_ID")), "youtube": {}}
+    ic, isec = instagram_client(settings.data_dir)
+    out["instagram_client"] = bool(ic and isec)
+    out["instagram"] = {}
     for ch in settings.channels():
         key = ch["key"]
+        ig = load(settings.data_dir, f"instagram_{key}")
+        ig_env = bool(os.environ.get(f"INSTAGRAM_ACCESS_TOKEN_{key.upper()}"))
+        out["instagram"][key] = {"name": ch.get("name", key), "connected": ig_env or bool(ig.get("access_token")),
+                                 "username": ig.get("username") or ("set in .env" if ig_env else None),
+                                 "days_left": max(0, (ig.get("expires_at", 0) - int(time.time())) // 86400) if ig else None}
         env = bool(os.environ.get(f"YOUTUBE_REFRESH_TOKEN_{key.upper()}"))
         saved = load(settings.data_dir, f"youtube_{key}")
         out["youtube"][key] = {"name": ch.get("name", key), "connected": env or bool(saved.get("refresh_token")),
                                "channel_title": saved.get("channel_title") or ("set in .env" if env else None),
                                "channel_id": saved.get("channel_id")}
     return out
+
+
+# ---------------------------------------------------------------- Instagram (Instagram API with Instagram Login)
+
+IG_AUTH_URL = "https://www.instagram.com/oauth/authorize"
+IG_TOKEN_URL = "https://api.instagram.com/oauth/access_token"
+IG_GRAPH = "https://graph.instagram.com"
+INSTAGRAM_SCOPES = ["instagram_business_basic", "instagram_business_content_publish",
+                    "instagram_business_manage_insights"]
+IG_REFRESH_WITHIN_S = 15 * 86400        # refresh long-lived tokens when less than 15 days are left
+
+
+def instagram_client(data_dir: Path) -> tuple[str, str]:
+    cid, sec = os.environ.get("INSTAGRAM_APP_ID", ""), os.environ.get("INSTAGRAM_APP_SECRET", "")
+    if cid and sec:
+        return cid, sec
+    saved = load(data_dir, "instagram_client")
+    return saved.get("app_id", ""), saved.get("app_secret", "")
+
+
+def save_instagram_client(data_dir: Path, app_id: str, app_secret: str) -> None:
+    app_id, app_secret = app_id.strip(), app_secret.strip()
+    if not app_id.isdigit():
+        raise ValueError("the Instagram app ID is a number (Instagram > API setup with Instagram login > "
+                         "Business login settings)")
+    if not (len(app_secret) >= 16 and app_secret.isalnum()):
+        raise ValueError("the Instagram app secret looks wrong (32 letters and digits, shown after 'Show')")
+    save(data_dir, "instagram_client", {"app_id": app_id, "app_secret": app_secret})
+
+
+def instagram_auth_url(data_dir: Path, redirect_uri: str, state: str) -> str:
+    cid, _ = instagram_client(data_dir)
+    if not cid:
+        raise ValueError("add the Instagram app ID and secret first")
+    # force_reauth lets you pick a different Instagram account for the second channel.
+    return IG_AUTH_URL + "?" + urlencode({"client_id": cid, "redirect_uri": redirect_uri, "response_type": "code",
+                                          "scope": ",".join(INSTAGRAM_SCOPES), "state": state,
+                                          "force_reauth": "true", "enable_fb_login": "0"})
+
+
+def _json(r: requests.Response, what: str) -> dict:
+    try:
+        data = r.json()
+    except ValueError:
+        data = {}
+    if r.status_code != 200:
+        msg = (data.get("error_message") or (data.get("error") or {}).get("message") if isinstance(data, dict) else None)
+        raise ValueError(f"Instagram refused the {what} ({r.status_code}): {msg or r.text[:200]}")
+    return data
+
+
+def instagram_connect(data_dir: Path, channel_key: str, code: str, redirect_uri: str,
+                      session: requests.Session | None = None) -> dict:
+    """Code -> short-lived token -> 60-day token; check the account type; save. Nothing is posted."""
+    http = session or requests.Session()
+    cid, sec = instagram_client(data_dir)
+    code = code.strip().removesuffix("#_")
+    short = _json(http.post(IG_TOKEN_URL, data={"client_id": cid, "client_secret": sec, "grant_type": "authorization_code",
+                                                "redirect_uri": redirect_uri, "code": code}, timeout=30), "sign-in code")
+    if isinstance(short.get("data"), list) and short["data"]:
+        short = short["data"][0]
+    granted = short.get("permissions") or []
+    if isinstance(granted, str):
+        granted = granted.split(",")
+    if granted and "instagram_business_content_publish" not in granted:
+        raise ValueError("publishing permission was not granted; connect again and allow all requested permissions")
+    long = _json(http.get(f"{IG_GRAPH}/access_token", params={"grant_type": "ig_exchange_token", "client_secret": sec,
+                                                               "access_token": short["access_token"]}, timeout=30),
+                 "long-lived token")
+    me = _json(http.get(f"{IG_GRAPH}/me", params={"fields": "user_id,username,account_type",
+                                                  "access_token": long["access_token"]}, timeout=30), "profile lookup")
+    if me.get("account_type") not in (None, "BUSINESS", "MEDIA_CREATOR"):
+        raise ValueError(f"@{me.get('username')} is a personal account; switch it to a professional (Business or "
+                         "Creator) account in the Instagram app, then connect again")
+    now = int(time.time())
+    info = {"access_token": long["access_token"], "user_id": str(me.get("user_id") or short.get("user_id")),
+            "username": me.get("username"), "account_type": me.get("account_type"),
+            "expires_at": now + int(long.get("expires_in") or 60 * 86400), "connected_at": now}
+    save(data_dir, f"instagram_{channel_key}", info)
+    return {"username": info["username"], "user_id": info["user_id"]}
+
+
+def instagram_credentials(data_dir: Path, channel_key: str, session: requests.Session | None = None) -> tuple[str, str]:
+    """(user_id, access_token) for the connected account, refreshing the 60-day token when it is getting old."""
+    info = load(data_dir, f"instagram_{channel_key}")
+    if not info.get("access_token"):
+        return "", ""
+    now = int(time.time())
+    if info.get("expires_at", 0) - now < IG_REFRESH_WITHIN_S and now - info.get("connected_at", now) > 86400:
+        http = session or requests.Session()
+        try:
+            new = _json(http.get(f"{IG_GRAPH}/refresh_access_token", params={
+                "grant_type": "ig_refresh_token", "access_token": info["access_token"]}, timeout=30), "token refresh")
+            info.update(access_token=new["access_token"], expires_at=now + int(new.get("expires_in") or 60 * 86400),
+                        connected_at=now)
+            save(data_dir, f"instagram_{channel_key}", info)
+        except (ValueError, requests.RequestException, KeyError):
+            pass                                  # the old token still works until it expires
+    return info.get("user_id", ""), info["access_token"]
+
+
+def code_from_pasted_url(pasted: str) -> dict:
+    """The address bar after signing in, when the browser could not open the https redirect address."""
+    from urllib.parse import parse_qs, urlparse
+
+    q = parse_qs(urlparse(pasted.strip()).query)
+    if not q.get("code") and not q.get("error"):
+        raise ValueError("that address has no sign-in code; copy the whole address from the browser's address bar")
+    return {k: v[0] for k, v in q.items()}
