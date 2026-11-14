@@ -466,3 +466,14 @@ def test_direct_assets_found_through_business_portfolio(settings):
     info = accounts.instagram_save_token(settings.data_dir, "br", SYSTEM_TOKEN, expected_username="vicepulse.brasil",
                                          session=FakeSystemUserDirectAssets(business_route=True))
     assert info["user_id"] == "17841400000000022" and info["graph"] == "https://graph.facebook.com"
+
+
+def test_one_token_connects_both_channels(settings, conn, server):
+    from vicepulse import accounts
+    base, app = server
+    app.http = FakeSystemUserDirectAssets(business_route=True)
+    t = token(requests.get(base + "/accounts").text)
+    r = requests.post(base + "/accounts/instagram-token", data={"csrf": t, "channel": "*", "token": SYSTEM_TOKEN})
+    assert "EN @vicepulse.en (ID 17841400000000011), BR @vicepulse.brasil (ID 17841400000000022)" in r.text
+    assert SYSTEM_TOKEN not in r.text and "Not saved" not in r.text
+    assert accounts.load(settings.data_dir, "instagram_en")["user_id"] == "17841400000000011"

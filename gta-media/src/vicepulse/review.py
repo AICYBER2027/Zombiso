@@ -195,6 +195,10 @@ class ReviewApp:
                'Token next to one account, copy it, and paste it below for the matching channel. VicePulse checks which '
                'account it opens, that it is the right one, and that it may publish, then stores it. The token is never '
                'shown again.</p>']
+        out.append(f'<form class=row method=post action="/accounts/instagram-token">{csrf}'
+                   '<input type=hidden name=channel value="*"><span class=tag>ALL CHANNELS (one token for both)</span>'
+                   '<input type=password name=token placeholder="paste the token once" required autocomplete=off>'
+                   '<button class=approve>Check and save</button></form><p class=meta>Or per channel:</p>')
         for key, ig in st["instagram"].items():
             out.append(f'<form class=row method=post action="/accounts/instagram-token">{csrf}'
                        f'<input type=hidden name=channel value="{e(key)}">'
@@ -398,6 +402,23 @@ def make_handler(app: ReviewApp):
                 try:
                     ch = form.get("channel", "")
                     cfg = {c["key"]: c for c in app.settings.channels()}
+                    if ch == "*":
+                        done, missed = [], []
+                        for key, c in cfg.items():
+                            try:
+                                i = accounts.instagram_save_token(app.settings.data_dir, key, form.get("token", ""),
+                                                                  expected_username=c.get("instagram_username"),
+                                                                  session=getattr(app, "http", None))
+                                done.append(f"{key.upper()} @{i['username']} (ID {i['user_id']})")
+                            except ValueError as ex:
+                                missed.append(f"{key.upper()}: {ex}")
+                        if not done:
+                            raise ValueError(" || ".join(missed))
+                        note = "Instagram saved: " + ", ".join(done) + "; publishing permission confirmed."
+                        if missed:
+                            note += " Not saved - " + " || ".join(missed)
+                        return self._redirect("/accounts?msg=" + quote(note + " Nothing was published.")
+                                              + ("&err=1" if missed else ""))
                     if ch not in cfg:
                         raise ValueError("unknown channel")
                     info = accounts.instagram_save_token(app.settings.data_dir, ch, form.get("token", ""),
