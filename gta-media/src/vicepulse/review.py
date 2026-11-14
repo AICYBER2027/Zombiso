@@ -189,7 +189,20 @@ class ReviewApp:
         return "".join(out)
 
     def instagram_section(self, st: dict, csrf: str) -> str:
-        out = ['<h3>Instagram</h3>']
+        out = ['<h3>Instagram</h3>',
+               '<div class=card><b>Option A - token from Meta (Unified Login, "Generate Token")</b><p class=meta>In Meta: '
+               '<b>Use cases &gt; Customize &gt; Instagram API setup &gt; Step 2 Generate access token</b>. Press Generate '
+               'Token next to one account, copy it, and paste it below for the matching channel. VicePulse checks which '
+               'account it opens, that it is the right one, and that it may publish, then stores it. The token is never '
+               'shown again.</p>']
+        for key, ig in st["instagram"].items():
+            out.append(f'<form class=row method=post action="/accounts/instagram-token">{csrf}'
+                       f'<input type=hidden name=channel value="{e(key)}">'
+                       f'<span class=tag>{e(key).upper()} @{e(ig.get("expected") or "")}</span>'
+                       '<input type=password name=token placeholder="paste the access token" required autocomplete=off>'
+                       '<input type=text name=ig_user_id placeholder="Instagram account ID (optional)" style="max-width:220px">'
+                       '<button class=approve>Check and save</button></form>')
+        out.append('</div><p class=meta><b>Option B - log in with Instagram</b> (Instagram Login apps):</p>')
         if not st["instagram_client"]:
             out.append(
                 '<div class=card><b>Step 1 - Instagram app</b><p class=meta>In your Meta app: <b>Instagram &gt; API setup '
@@ -205,8 +218,14 @@ class ReviewApp:
             out.append(f'<p class=meta>Instagram app: ready. Redirect address: <code>{e(self.instagram_redirect)}</code></p>')
         rows = ['<table><tr><th>VicePulse channel</th><th>Instagram account</th><th></th></tr>']
         for key, ig in st["instagram"].items():
-            who = (f'connected: <b>@{e(ig["username"])}</b>' + (f' &middot; login renews automatically '
-                   f'({ig["days_left"]} days left)' if ig.get("days_left") is not None else "")) if ig["connected"] else "not connected"
+            if not ig["connected"]:
+                who = "not connected"
+            else:
+                life = ("token never expires" if ig.get("token_kind") == "system_user" else
+                        f'login renews automatically ({ig["days_left"]} days left)' if ig.get("days_left") is not None else "")
+                ok = ig.get("expected") and (ig.get("username") or "").lower() == ig["expected"].lower()
+                who = (f'connected: <b>@{e(ig["username"])}</b> {"&#10003;" if ok else "(expected @" + e(ig.get("expected")) + ")"}'
+                       f' &middot; ID {e(ig.get("user_id") or "")} &middot; {life}')
             btn = ""
             if st["instagram_client"]:
                 label = "Reconnect" if ig["connected"] else "Connect Instagram"
@@ -359,6 +378,21 @@ def make_handler(app: ReviewApp):
                                                  form.get("client_secret", ""))
                     return self._redirect("/accounts?msg=" + quote("Google sign-in app saved. Now press Connect YouTube."))
                 except ValueError as ex:
+                    return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
+            if path == "/accounts/instagram-token":
+                try:
+                    ch = form.get("channel", "")
+                    cfg = {c["key"]: c for c in app.settings.channels()}
+                    if ch not in cfg:
+                        raise ValueError("unknown channel")
+                    info = accounts.instagram_save_token(app.settings.data_dir, ch, form.get("token", ""),
+                                                         ig_user_id=form.get("ig_user_id", ""),
+                                                         expected_username=cfg[ch].get("instagram_username"),
+                                                         session=getattr(app, "http", None))
+                    return self._redirect("/accounts?msg=" + quote(
+                        f"Instagram {ch.upper()} saved: @{info['username']} (ID {info['user_id']}), publishing permission "
+                        "confirmed. Nothing was published."))
+                except (ValueError, KeyError, OSError) as ex:
                     return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
             if path in ("/accounts/instagram-client", "/accounts/instagram-start", "/accounts/instagram-paste"):
                 try:

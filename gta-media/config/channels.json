@@ -5,22 +5,55 @@
       "name": "VicePulse EN",
       "language": "en",
       "clips_per_day": 5,
-      "platforms": ["youtube", "instagram", "tiktok"],
+      "platforms": [
+        "youtube",
+        "instagram",
+        "tiktok"
+      ],
       "timezone": "America/New_York",
-      "default_slots": ["09:30", "12:30", "16:00", "19:00", "22:00"],
+      "default_slots": [
+        "09:30",
+        "12:30",
+        "16:00",
+        "19:00",
+        "22:00"
+      ],
       "voice_style": "Fast, dry, confident gaming commentator. Short sentences. One real opinion per clip.",
-      "hashtags": ["#GTA", "#GTA6", "#Gaming", "#VicePulse"]
+      "hashtags": [
+        "#GTA",
+        "#GTA6",
+        "#Gaming",
+        "#VicePulse"
+      ],
+      "instagram_username": "vicepulse.en"
     },
     {
       "key": "br",
       "name": "VicePulse BR",
       "language": "pt-BR",
       "clips_per_day": 5,
-      "platforms": ["youtube", "instagram", "tiktok"],
+      "platforms": [
+        "youtube",
+        "instagram",
+        "tiktok"
+      ],
       "timezone": "America/Sao_Paulo",
-      "default_slots": ["10:00", "12:30", "17:00", "19:30", "22:00"],
+      "default_slots": [
+        "10:00",
+        "12:30",
+        "17:00",
+        "19:30",
+        "22:00"
+      ],
       "voice_style": "Comentarista brasileiro, direto e bem-humorado. Frases curtas. Uma opiniao real por clipe. Escreva em portugues do Brasil nativo, nao traduzido.",
-      "hashtags": ["#GTA", "#GTA6", "#GamesBR", "#VicePulse"]
+      "hashtags": [
+        "#GTA",
+        "#GTA6",
+        "#GamesBR",
+        "#VicePulse"
+      ],
+      "instagram_username": "vicepulse.brasil",
+      "youtube_handle": "@VicePulse-BRASIL"
     }
   ]
 }

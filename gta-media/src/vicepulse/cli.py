@@ -119,6 +119,12 @@ def cmd_youtube_client(a, s, conn):
     return out
 
 
+def cmd_accounts_check(a, s, conn):
+    from . import accounts
+
+    return accounts.verify(s)
+
+
 def cmd_autoclip(a, s, conn):
     if not 15 <= a.clip_seconds <= 60:
         raise ValueError("--clip-seconds must be between 15 and 60")
@@ -292,6 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--layout", default="auto", choices=["auto", "crop", "blur"])
     sp = add("check", cmd_check, "final policy and quality check, then queue for approval")
     sp.add_argument("--clips")
+    add("accounts-check", cmd_accounts_check, "check which YouTube/Instagram account each stored login opens (read-only)")
     sp = add("youtube-client", cmd_youtube_client,
              "save the Google OAuth client from its downloaded JSON file (secret is stored, never printed)")
     sp.add_argument("--json-file", required=True)

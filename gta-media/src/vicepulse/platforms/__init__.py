@@ -27,12 +27,15 @@ def make_publisher(platform: str, channel_key: str, *, audited: bool = False) ->
     if platform == "instagram":
         user_id = platform_secret("instagram", channel_key, "user_id")
         token = platform_secret("instagram", channel_key, "access_token")
+        graph = None
         if not (user_id and token):
             from .. import accounts
             from ..config import Settings
 
-            user_id, token = accounts.instagram_credentials(Settings().data_dir, channel_key)
-        return InstagramPublisher(user_id=user_id, access_token=token)
+            data_dir = Settings().data_dir
+            user_id, token = accounts.instagram_credentials(data_dir, channel_key)
+            graph = accounts.instagram_graph(data_dir, channel_key)
+        return InstagramPublisher(user_id=user_id, access_token=token, graph=graph)
     if platform == "tiktok":
         return TikTokPublisher(access_token=platform_secret("tiktok", channel_key, "access_token"), audited=audited)
     raise PlatformError(f"unknown platform {platform}")

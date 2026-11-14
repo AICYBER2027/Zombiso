@@ -243,3 +243,78 @@ def test_instagram_personal_account_refused_and_token_refresh(settings):
     accounts.save(settings.data_dir, "instagram_en", info)
     assert accounts.instagram_credentials(settings.data_dir, "en", session=FakeInstagram()) == ("1", "IG-REFRESHED")
     assert accounts.load(settings.data_dir, "instagram_en")["expires_at"] > int(_t.time()) + 50 * 86400
+
+
+class FakeMetaFB:
+    """graph.facebook.com for a system-user token that manages both Instagram accounts."""
+
+    def __init__(self, can_publish=True):
+        self.can_publish = can_publish
+        self.accounts = {"17841400000000011": "vicepulse.en", "17841400000000022": "vicepulse.brasil"}
+
+    def _resp(self, body, code=200):
+        r = requests.Response()
+        r.status_code, r._content = code, json.dumps(body).encode()
+        return r
+
+    def get(self, url, params=None, timeout=None, headers=None):
+        assert url.startswith("https://graph.facebook.com/")
+        assert params["access_token"].startswith("EAA")
+        path = url.split("graph.facebook.com/")[1]
+        if path == "me/accounts":
+            return self._resp({"data": [{"instagram_business_account": {"id": i, "username": u}}
+                                        for i, u in self.accounts.items()]})
+        ig, _, rest = path.partition("/")
+        if ig not in self.accounts:
+            return self._resp({"error": {"message": "Unsupported get request"}}, 400)
+        if rest == "content_publishing_limit":
+            return self._resp({"data": [{"quota_usage": 0}]} if self.can_publish else
+                              {"error": {"message": "permission"}}, 200 if self.can_publish else 403)
+        return self._resp({"id": ig, "username": self.accounts[ig]})
+
+
+SYSTEM_TOKEN = "EAAG" + "x" * 120
+
+
+def test_paste_system_user_token_maps_each_channel(settings, conn, server, monkeypatch):
+    from vicepulse import accounts
+    from vicepulse.platforms import make_publisher
+    base, app = server
+    for v in ("INSTAGRAM_USER_ID_EN", "INSTAGRAM_ACCESS_TOKEN_EN", "INSTAGRAM_USER_ID_BR", "INSTAGRAM_ACCESS_TOKEN_BR"):
+        monkeypatch.delenv(v, raising=False)
+    app.http = FakeMetaFB()
+    page = requests.get(base + "/accounts").text
+    assert "Generate Token" in page and "@vicepulse.en" in page and "@vicepulse.brasil" in page
+    t = token(page)
+
+    # wrong account for the channel is refused (EN token pasted into BR, by ID)
+    r = requests.post(base + "/accounts/instagram-token", data={"csrf": t, "channel": "br", "token": SYSTEM_TOKEN,
+                                                                "ig_user_id": "17841400000000011"})
+    assert "belongs to @vicepulse.en" in r.text
+    # by expected username from /me/accounts
+    r = requests.post(base + "/accounts/instagram-token", data={"csrf": t, "channel": "en", "token": SYSTEM_TOKEN})
+    assert "Instagram EN saved: @vicepulse.en (ID 17841400000000011)" in r.text and SYSTEM_TOKEN not in r.text
+    r = requests.post(base + "/accounts/instagram-token", data={"csrf": t, "channel": "br", "token": SYSTEM_TOKEN,
+                                                                "ig_user_id": "17841400000000022"})
+    assert "Instagram BR saved: @vicepulse.brasil" in r.text and "token never expires" in r.text
+
+    monkeypatch.setenv("VICEPULSE_DATA_DIR", str(settings.data_dir))
+    pub = make_publisher("instagram", "br")
+    assert (pub.user_id, pub.graph) == ("17841400000000022", "https://graph.facebook.com")
+    assert accounts.load(settings.data_dir, "instagram_br")["expires_at"] is None
+
+    check = accounts.verify(settings, session=app.http)
+    assert check["instagram"]["en"]["matches_expected"] and check["instagram"]["br"]["matches_expected"]
+    assert check["instagram"]["br"]["publish_permission"] and check["live_publishing"] == "off"
+    assert SYSTEM_TOKEN not in json.dumps(check)
+    assert conn.execute("SELECT count(*) AS n FROM publish_jobs").fetchone()["n"] == 0
+
+
+def test_token_without_publish_permission_is_refused(settings):
+    from vicepulse import accounts
+    with pytest.raises(ValueError, match="not allowed to publish"):
+        accounts.instagram_save_token(settings.data_dir, "en", SYSTEM_TOKEN, expected_username="vicepulse.en",
+                                      session=FakeMetaFB(can_publish=False))
+    with pytest.raises(ValueError, match="does not look like"):
+        accounts.instagram_save_token(settings.data_dir, "en", "short", expected_username="vicepulse.en")
+    assert accounts.load(settings.data_dir, "instagram_en") == {}
