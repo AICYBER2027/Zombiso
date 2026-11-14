@@ -175,14 +175,14 @@ class FakeInstagram:
         return self._resp({"data": [{"access_token": "IG-SHORT", "user_id": "1789",
                                      "permissions": "instagram_business_basic,instagram_business_content_publish"}]})
 
-    def get(self, url, params=None, timeout=None):
-        self.calls.append(("get", url, dict(params)))
+    def get(self, url, params=None, timeout=None, headers=None):
+        self.calls.append(("get", url, dict(params or {})))
         if url.endswith("/access_token"):
             assert params["grant_type"] == "ig_exchange_token" and params["access_token"] == "IG-SHORT"
             return self._resp({"access_token": "IG-LONG-secret", "token_type": "bearer", "expires_in": 5184000})
         if url.endswith("/refresh_access_token"):
             return self._resp({"access_token": "IG-REFRESHED", "expires_in": 5184000})
-        assert params["access_token"] == "IG-LONG-secret"
+        assert headers["Authorization"] == "Bearer IG-LONG-secret" and "access_token" not in (params or {})
         return self._resp({"user_id": "17841400000000001", "username": self.username, "account_type": self.account_type})
 
 
@@ -258,9 +258,14 @@ class FakeMetaFB:
         return r
 
     def get(self, url, params=None, timeout=None, headers=None):
+        assert "access_token" not in (params or {}), "token must never be in the URL"
+        if url.startswith("https://graph.instagram.com/"):
+            return self._resp({"error": {"message": "Invalid OAuth access token - Cannot parse access token"}}, 400)
         assert url.startswith("https://graph.facebook.com/")
-        assert params["access_token"].startswith("EAA")
+        assert headers["Authorization"].startswith("Bearer EAA")
         path = url.split("graph.facebook.com/")[1]
+        if path == "debug_token":
+            return self._resp({"data": {"type": "SYSTEM_USER", "granular_scopes": []}})
         if path == "me/accounts":
             return self._resp({"data": [{"instagram_business_account": {"id": i, "username": u}}
                                         for i, u in self.accounts.items()]})
@@ -287,10 +292,13 @@ def test_paste_system_user_token_maps_each_channel(settings, conn, server, monke
     assert "Generate Token" in page and "@vicepulse.en" in page and "@vicepulse.brasil" in page
     t = token(page)
 
-    # wrong account for the channel is refused (EN token pasted into BR, by ID)
+    # a token that opens only the EN account is refused for BR
+    app.http.accounts = {"17841400000000011": "vicepulse.en"}
     r = requests.post(base + "/accounts/instagram-token", data={"csrf": t, "channel": "br", "token": SYSTEM_TOKEN,
                                                                 "ig_user_id": "17841400000000011"})
-    assert "belongs to @vicepulse.en" in r.text
+    assert "does not open @vicepulse.brasil (@vicepulse.en)" in r.text
+    assert "Instagram BR saved" not in r.text
+    app.http.accounts = {"17841400000000011": "vicepulse.en", "17841400000000022": "vicepulse.brasil"}
     # by expected username from /me/accounts
     r = requests.post(base + "/accounts/instagram-token", data={"csrf": t, "channel": "en", "token": SYSTEM_TOKEN})
     assert "Instagram EN saved: @vicepulse.en (ID 17841400000000011)" in r.text and SYSTEM_TOKEN not in r.text
@@ -318,3 +326,70 @@ def test_token_without_publish_permission_is_refused(settings):
     with pytest.raises(ValueError, match="does not look like"):
         accounts.instagram_save_token(settings.data_dir, "en", "short", expected_username="vicepulse.en")
     assert accounts.load(settings.data_dir, "instagram_en") == {}
+
+
+
+class FakeUnifiedLogin:
+    """The reported case: an EAA token whose account only resolves on graph.instagram.com, and an ID that
+    graph.facebook.com does not know ('Unsupported get request')."""
+
+    def __init__(self, debug_ids=None):
+        self.debug_ids, self.urls = debug_ids, []
+
+    def _resp(self, body, code=200):
+        r = requests.Response()
+        r.status_code, r._content = code, json.dumps(body).encode()
+        return r
+
+    def get(self, url, params=None, timeout=None, headers=None):
+        assert "access_token" not in (params or {}) and headers["Authorization"] == "Bearer " + SYSTEM_TOKEN
+        self.urls.append(url)
+        if url == "https://graph.instagram.com/me":
+            if self.debug_ids:
+                return self._resp({"error": {"message": "Invalid OAuth access token"}}, 400)
+            return self._resp({"user_id": "26000000000000001", "username": "vicepulse.en", "account_type": "BUSINESS"})
+        if url.endswith("/debug_token"):
+            return self._resp({"data": {"type": "SYSTEM_USER", "granular_scopes": [
+                {"scope": "instagram_basic", "target_ids": self.debug_ids or []},
+                {"scope": "instagram_content_publish", "target_ids": self.debug_ids or []}]}})
+        if url == "https://graph.facebook.com/17841400000000011" and self.debug_ids:
+            return self._resp({"id": "17841400000000011", "username": "vicepulse.en"})
+        if url.endswith("/content_publishing_limit"):
+            return self._resp({"data": [{"quota_usage": 0}]})
+        return self._resp({"error": {"message": "Unsupported get request. Object with ID '123' does not exist, "
+                                                "cannot be loaded due to missing permission, or does not support this operation"}}, 400)
+
+
+def test_unified_login_token_with_unknown_id_is_found_on_graph_instagram(settings):
+    from vicepulse import accounts
+    fake = FakeUnifiedLogin()
+    info = accounts.instagram_save_token(settings.data_dir, "en", SYSTEM_TOKEN, ig_user_id="123",
+                                         expected_username="vicepulse.en", session=fake)
+    assert info["username"] == "vicepulse.en" and info["graph"] == "https://graph.instagram.com"
+    assert info["user_id"] == "26000000000000001"
+    saved = accounts.load(settings.data_dir, "instagram_en")
+    assert saved["expires_at"] is None                      # not an IG-prefixed token: VicePulse does not renew it
+
+
+def test_system_user_token_found_through_its_own_grants(settings):
+    from vicepulse import accounts
+    fake = FakeUnifiedLogin(debug_ids=["17841400000000011"])
+    info = accounts.instagram_save_token(settings.data_dir, "en", SYSTEM_TOKEN, ig_user_id="999",
+                                         expected_username="vicepulse.en", session=fake)
+    assert (info["user_id"], info["graph"], info["token_kind"]) == ("17841400000000011", "https://graph.facebook.com",
+                                                                    "system_user")
+
+
+def test_failure_message_explains_every_route_without_the_token(settings):
+    from vicepulse import accounts
+
+    class Nothing(FakeUnifiedLogin):
+        def get(self, url, params=None, timeout=None, headers=None):
+            return self._resp({"error": {"message": "Unsupported get request."}}, 400)
+
+    with pytest.raises(ValueError) as ex:
+        accounts.instagram_save_token(settings.data_dir, "en", SYSTEM_TOKEN, ig_user_id="123",
+                                      expected_username="vicepulse.en", session=Nothing())
+    msg = str(ex.value)
+    assert "graph.instagram.com/me" in msg and "debug_token" in msg and "graph.facebook.com/<account 123>" in msg
+    assert "graph.instagram.com/<account 123>" in msg and SYSTEM_TOKEN not in msg and "EAA (Facebook" in msg

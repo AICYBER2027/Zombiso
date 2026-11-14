@@ -220,11 +220,14 @@ def instagram_connect(data_dir: Path, channel_key: str, code: str, redirect_uri:
         granted = granted.split(",")
     if granted and "instagram_business_content_publish" not in granted:
         raise ValueError("publishing permission was not granted; connect again and allow all requested permissions")
-    long = _json(http.get(f"{IG_GRAPH}/access_token", params={"grant_type": "ig_exchange_token", "client_secret": sec,
-                                                               "access_token": short["access_token"]}, timeout=30),
-                 "long-lived token")
-    me = _json(http.get(f"{IG_GRAPH}/me", params={"fields": "user_id,username,account_type",
-                                                  "access_token": long["access_token"]}, timeout=30), "profile lookup")
+    try:   # this Meta call needs the token as a parameter; never let the URL reach an error message
+        long = _json(http.get(f"{IG_GRAPH}/access_token", params={"grant_type": "ig_exchange_token", "client_secret": sec,
+                                                                   "access_token": short["access_token"]}, timeout=30),
+                     "long-lived token")
+        me = _json(http.get(f"{IG_GRAPH}/me", params={"fields": "user_id,username,account_type"},
+                            headers={"Authorization": f"Bearer {long['access_token']}"}, timeout=30), "profile lookup")
+    except requests.RequestException as ex:
+        raise ValueError(f"could not reach Instagram ({type(ex).__name__}); try again") from None
     if me.get("account_type") not in (None, "BUSINESS", "MEDIA_CREATOR"):
         raise ValueError(f"@{me.get('username')} is a personal account; switch it to a professional (Business or "
                          "Creator) account in the Instagram app, then connect again")
@@ -272,6 +275,93 @@ def instagram_graph(data_dir: Path, channel_key: str) -> str:
     return load(data_dir, f"instagram_{channel_key}").get("graph") or IG_GRAPH
 
 
+def _token_kind_label(token: str) -> str:
+    return "EAA (Facebook/system-user)" if token.startswith("EAA") else "IG (Instagram)" if token.startswith("IG") else "other"
+
+
+def _meta_error(r: requests.Response | None) -> str:
+    if r is None:
+        return "no response"
+    try:
+        err = r.json().get("error", {})
+        msg = err.get("message", "") if isinstance(err, dict) else str(err)
+    except ValueError:
+        msg = ""
+    return f"{r.status_code} {msg}".strip()[:180]
+
+
+def find_instagram_account(token: str, *, ig_user_id: str = "", expected_username: str | None = None,
+                           session: requests.Session | None = None) -> tuple[dict | None, list[str]]:
+    """Which Instagram professional account a Meta token opens, trying every supported route.
+
+    The token goes only in the Authorization header (never in a URL, so it cannot leak into error text).
+    Returns (account or None, list of attempts with Meta's error messages, no secrets).
+    """
+    http = session or requests.Session()
+    hdr = {"Authorization": f"Bearer {token}"}
+    tried: list[str] = []
+
+    def get(url, params, label):
+        try:
+            r = http.get(url, params=params, headers=hdr, timeout=30)
+        except requests.RequestException as ex:
+            tried.append(f"{label}: network error ({type(ex).__name__})")
+            return None
+        if r.status_code != 200:
+            tried.append(f"{label}: {_meta_error(r)}")
+            return None
+        try:
+            return r.json()
+        except ValueError:
+            tried.append(f"{label}: not JSON")
+            return None
+
+    def ok(acc):
+        return not expected_username or (acc.get("username") or "").lower() == expected_username.lower()
+
+    candidates: list[dict] = []
+    # 1) Instagram Login / Unified Login tokens identify themselves on graph.instagram.com
+    me = get(f"{IG_GRAPH}/me", {"fields": "user_id,username,account_type"}, "graph.instagram.com/me")
+    if me and me.get("username"):
+        candidates.append({"graph": IG_GRAPH, "user_id": str(me.get("user_id") or me.get("id")),
+                           "username": me["username"], "token_kind": "instagram_login"})
+    # 2) the token's own grants list the Instagram account IDs it may use
+    if not any(ok(c) for c in candidates):
+        dbg = get(f"{FB_GRAPH}/debug_token", {"input_token": token}, "graph.facebook.com/debug_token")
+        ids: list[str] = []
+        data = (dbg or {}).get("data") or {}
+        for g in data.get("granular_scopes") or []:
+            if g.get("scope", "").startswith("instagram"):
+                ids += [str(t) for t in g.get("target_ids") or []]
+        kind = "system_user" if data.get("type") == "SYSTEM_USER" else "facebook_user"
+        for i in dict.fromkeys(([ig_user_id] if ig_user_id else []) + ids):
+            acc = get(f"{FB_GRAPH}/{i}", {"fields": "id,username"}, f"graph.facebook.com/<account {i}>")
+            if acc and acc.get("username"):
+                candidates.append({"graph": FB_GRAPH, "user_id": str(acc["id"]), "username": acc["username"],
+                                   "token_kind": kind})
+    # 3) the given ID on graph.instagram.com (Instagram-scoped IDs)
+    if ig_user_id and not any(ok(c) for c in candidates):
+        acc = get(f"{IG_GRAPH}/{ig_user_id}", {"fields": "user_id,username"}, f"graph.instagram.com/<account {ig_user_id}>")
+        if acc and acc.get("username"):
+            candidates.append({"graph": IG_GRAPH, "user_id": str(acc.get("user_id") or ig_user_id),
+                               "username": acc["username"], "token_kind": "instagram_login"})
+    # 4) Facebook Page-linked accounts
+    if not any(ok(c) for c in candidates):
+        pages = get(f"{FB_GRAPH}/me/accounts", {"fields": "instagram_business_account{id,username}", "limit": "100"},
+                    "graph.facebook.com/me/accounts")
+        for p in (pages or {}).get("data", []):
+            a = p.get("instagram_business_account")
+            if a and a.get("username"):
+                candidates.append({"graph": FB_GRAPH, "user_id": str(a["id"]), "username": a["username"],
+                                   "token_kind": "facebook_user"})
+    match = [c for c in candidates if ok(c)]
+    if match:
+        return match[0], tried
+    if candidates:
+        tried.append("found only: " + ", ".join(sorted({"@" + c["username"] for c in candidates})))
+    return None, tried
+
+
 def instagram_save_token(data_dir: Path, channel_key: str, token: str, *, ig_user_id: str = "",
                          expected_username: str | None = None, session: requests.Session | None = None) -> dict:
     """Check a token Meta generated (e.g. the Unified Login 'Generate Token' button) and store it for one channel.
@@ -283,61 +373,32 @@ def instagram_save_token(data_dir: Path, channel_key: str, token: str, *, ig_use
     token, ig_user_id = token.strip(), ig_user_id.strip()
     if len(token) < 40 or any(c.isspace() for c in token):
         raise ValueError("that does not look like a Meta access token (a long string, usually starting EAA or IG)")
-
-    def get(url, **params):
-        params["access_token"] = token
-        return http.get(url, params=params, timeout=30)
-
-    found = None
-    if token.startswith("IG"):                      # Instagram Login token
-        r = get(f"{IG_GRAPH}/me", fields="user_id,username,account_type")
-        if r.status_code == 200:
-            me = r.json()
-            found = {"graph": IG_GRAPH, "user_id": str(me.get("user_id")), "username": me.get("username"),
-                     "token_kind": "instagram_login"}
-    else:                                           # Facebook / system-user token
-        if ig_user_id:
-            r = get(f"{FB_GRAPH}/{ig_user_id}", fields="id,username")
-            if r.status_code == 200:
-                me = r.json()
-                found = {"graph": FB_GRAPH, "user_id": str(me["id"]), "username": me.get("username"),
-                         "token_kind": "system_user"}
-        else:
-            r = get(f"{FB_GRAPH}/me/accounts", fields="instagram_business_account{id,username}", limit="100")
-            if r.status_code == 200:
-                igs = [p["instagram_business_account"] for p in r.json().get("data", [])
-                       if p.get("instagram_business_account")]
-                pick = [a for a in igs if expected_username and a.get("username") == expected_username] or \
-                       (igs if len(igs) == 1 else [])
-                if pick:
-                    found = {"graph": FB_GRAPH, "user_id": str(pick[0]["id"]), "username": pick[0].get("username"),
-                             "token_kind": "system_user"}
-                elif igs:
-                    raise ValueError("this token opens several Instagram accounts (" +
-                                     ", ".join("@" + str(a.get("username")) for a in igs) +
-                                     "); none is @" + str(expected_username))
+    if ig_user_id and not ig_user_id.isdigit():
+        raise ValueError("the Instagram account ID is a number; leave it empty if you are not sure")
+    found, tried = find_instagram_account(token, ig_user_id=ig_user_id, expected_username=expected_username,
+                                          session=http)
     if found is None:
-        try:
-            detail = r.json().get("error", {}).get("message", "")
-        except ValueError:
-            detail = ""
-        raise ValueError("Meta did not accept this token" + (f": {detail}" if detail else "") +
-                         ("" if ig_user_id or token.startswith("IG") else
-                          ". Add the Instagram account ID shown next to the account in Meta, then save again"))
-    if expected_username and (found["username"] or "").lower() != expected_username.lower():
-        raise ValueError(f"this token belongs to @{found['username']}, but this channel is @{expected_username}; "
-                         "generate the token for the right account")
-    r = get(f"{found['graph']}/{found['user_id']}/content_publishing_limit", fields="quota_usage,config")
+        others = [t for t in tried if t.startswith("found only")]
+        if others:
+            raise ValueError(f"this token does not open @{expected_username} ({others[0][len('found only: '):]}); "
+                             "generate the token next to the right account")
+        raise ValueError(f"Meta did not identify an Instagram account for this {_token_kind_label(token)} token. "
+                         "Tried: " + " | ".join(tried))
+    try:
+        r = http.get(f"{found['graph']}/{found['user_id']}/content_publishing_limit",
+                     params={"fields": "quota_usage,config"}, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    except requests.RequestException as ex:
+        raise ValueError(f"could not reach Meta to check publishing permission ({type(ex).__name__})") from None
     if r.status_code != 200:
-        raise ValueError(f"@{found['username']} was found, but the token is not allowed to publish Reels; generate "
-                         "it with the content publishing permission (instagram_content_publish / "
-                         "instagram_business_content_publish)")
+        raise ValueError(f"@{found['username']} was found (ID {found['user_id']}), but the token is not allowed to "
+                         f"publish Reels ({_meta_error(r)}); generate it with the content publishing permission")
     now = int(time.time())
+    # Only Instagram Login tokens are renewed by VicePulse (60 days); system-user tokens do not expire.
+    renewable = found["graph"] == IG_GRAPH and found["token_kind"] == "instagram_login" and token.startswith("IG")
     save(data_dir, f"instagram_{channel_key}", {**found, "access_token": token, "connected_at": now,
-                                                 "expires_at": None if found["token_kind"] == "system_user"
-                                                 else now + 60 * 86400})
+                                                 "expires_at": now + 60 * 86400 if renewable else None})
     return {"username": found["username"], "user_id": found["user_id"], "token_kind": found["token_kind"],
-            "publish_permission": True}
+            "graph": found["graph"], "publish_permission": True}
 
 
 def verify(settings: Settings, session: requests.Session | None = None) -> dict:
@@ -371,22 +432,24 @@ def verify(settings: Settings, session: requests.Session | None = None) -> dict:
                     res["matches_expected_handle"] = (handle or "").lower() == want.lower()
                 out["youtube"][key] = res
             except (ValueError, KeyError, requests.RequestException) as e:
-                out["youtube"][key] = {"connected": True, "ok": False, "error": str(e)}
+                out["youtube"][key] = {"connected": True, "ok": False,
+                                       "error": str(e) if isinstance(e, ValueError) else type(e).__name__}
         user_id, token = instagram_credentials(settings.data_dir, key, session=http)
         if not token:
             out["instagram"][key] = {"connected": False, "expected": ch.get("instagram_username")}
             continue
         graph = instagram_graph(settings.data_dir, key)
         try:
-            r = http.get(f"{graph}/{user_id}", params={"fields": "username", "access_token": token}, timeout=30)
+            hdr = {"Authorization": f"Bearer {token}"}
+            r = http.get(f"{graph}/{user_id}", params={"fields": "username"}, headers=hdr, timeout=30)
             name = r.json().get("username") if r.status_code == 200 else None
             q = http.get(f"{graph}/{user_id}/content_publishing_limit",
-                         params={"fields": "quota_usage", "access_token": token}, timeout=30)
+                         params={"fields": "quota_usage"}, headers=hdr, timeout=30)
             out["instagram"][key] = {"connected": True, "username": name, "user_id": user_id,
                                      "expected": ch.get("instagram_username"),
                                      "matches_expected": (name or "").lower() == (ch.get("instagram_username") or "").lower(),
                                      "publish_permission": q.status_code == 200,
                                      "token_kind": load(settings.data_dir, f"instagram_{key}").get("token_kind")}
         except (ValueError, requests.RequestException) as e:
-            out["instagram"][key] = {"connected": True, "ok": False, "error": str(e)}
+            out["instagram"][key] = {"connected": True, "ok": False, "error": type(e).__name__}
     return out
