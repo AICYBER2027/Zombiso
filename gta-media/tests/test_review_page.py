@@ -393,3 +393,76 @@ def test_failure_message_explains_every_route_without_the_token(settings):
     msg = str(ex.value)
     assert "graph.instagram.com/me" in msg and "debug_token" in msg and "graph.facebook.com/<account 123>" in msg
     assert "graph.instagram.com/<account 123>" in msg and SYSTEM_TOKEN not in msg and "EAA (Facebook" in msg
+
+
+class FakeSystemUserDirectAssets:
+    """The reported case: system-user token, Instagram accounts assigned directly (no Pages),
+    debug_token refused without app credentials."""
+
+    APP = ("2385291052288387", "0123456789abcdef0123456789abcdef")
+
+    def __init__(self, business_route=False):
+        self.business_route = business_route
+
+    def _resp(self, body, code=200):
+        r = requests.Response()
+        r.status_code, r._content = code, json.dumps(body).encode()
+        return r
+
+    def get(self, url, params=None, timeout=None, headers=None):
+        auth = headers["Authorization"]
+        if url.startswith("https://graph.instagram.com/"):
+            return self._resp({"error": {"message": "Invalid OAuth access token - Cannot parse access token"}}, 401)
+        path = url.split("graph.facebook.com/")[1]
+        if path == "debug_token":
+            if auth != "Bearer " + "|".join(self.APP):
+                return self._resp({"error": {"message": "(#100) You must provide an app access token"}}, 400)
+            assert params["input_token"] == SYSTEM_TOKEN
+            return self._resp({"data": {"type": "SYSTEM_USER", "granular_scopes": [
+                {"scope": "instagram_basic", "target_ids": ["17841400000000011", "17841400000000022"]},
+                {"scope": "instagram_content_publish", "target_ids": ["17841400000000011", "17841400000000022"]}]}})
+        assert auth == "Bearer " + SYSTEM_TOKEN
+        if path == "me/accounts":
+            return self._resp({"data": []})
+        if path == "me/businesses":
+            return self._resp({"data": [{"id": "900", "name": "VicePulse"}] if self.business_route else []})
+        if path == "900/instagram_business_accounts":
+            return self._resp({"data": [{"id": "17841400000000011", "username": "vicepulse.en"},
+                                        {"id": "17841400000000022", "username": "vicepulse.brasil"}]})
+        if path.endswith("/content_publishing_limit"):
+            return self._resp({"data": [{"quota_usage": 0}]})
+        names = {"17841400000000011": "vicepulse.en", "17841400000000022": "vicepulse.brasil"}
+        if path in names:
+            return self._resp({"id": path, "username": names[path]})
+        return self._resp({"error": {"message": "Unsupported get request."}}, 400)
+
+
+def test_direct_assets_without_app_credentials_explains_next_step(settings):
+    from vicepulse import accounts
+    with pytest.raises(ValueError) as ex:
+        accounts.instagram_save_token(settings.data_dir, "en", SYSTEM_TOKEN, expected_username="vicepulse.en",
+                                      session=FakeSystemUserDirectAssets())
+    msg = str(ex.value)
+    assert "no Facebook Page" in msg and "save the Meta app ID and app secret" in msg and SYSTEM_TOKEN not in msg
+
+
+def test_direct_assets_found_with_app_credentials(settings, conn, server):
+    from vicepulse import accounts
+    base, app = server
+    app.http = FakeSystemUserDirectAssets()
+    t = token(requests.get(base + "/accounts").text)
+    r = requests.post(base + "/accounts/meta-app", data={"csrf": t, "app_id": FakeSystemUserDirectAssets.APP[0],
+                                                         "app_secret": FakeSystemUserDirectAssets.APP[1]})
+    assert "Meta app saved" in r.text and FakeSystemUserDirectAssets.APP[1] not in r.text
+    r = requests.post(base + "/accounts/instagram-token", data={"csrf": t, "channel": "en", "token": SYSTEM_TOKEN})
+    assert "Instagram EN saved: @vicepulse.en (ID 17841400000000011)" in r.text
+    r = requests.post(base + "/accounts/instagram-token", data={"csrf": t, "channel": "br", "token": SYSTEM_TOKEN})
+    assert "Instagram BR saved: @vicepulse.brasil (ID 17841400000000022)" in r.text
+    assert accounts.load(settings.data_dir, "instagram_br")["token_kind"] == "system_user"
+
+
+def test_direct_assets_found_through_business_portfolio(settings):
+    from vicepulse import accounts
+    info = accounts.instagram_save_token(settings.data_dir, "br", SYSTEM_TOKEN, expected_username="vicepulse.brasil",
+                                         session=FakeSystemUserDirectAssets(business_route=True))
+    assert info["user_id"] == "17841400000000022" and info["graph"] == "https://graph.facebook.com"

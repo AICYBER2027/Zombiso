@@ -275,6 +275,24 @@ def instagram_graph(data_dir: Path, channel_key: str) -> str:
     return load(data_dir, f"instagram_{channel_key}").get("graph") or IG_GRAPH
 
 
+def meta_app(data_dir: Path) -> tuple[str, str]:
+    """The Meta (Facebook) app ID and secret, used only to ask Meta which accounts a token was granted."""
+    cid, sec = os.environ.get("META_APP_ID", ""), os.environ.get("META_APP_SECRET", "")
+    if cid and sec:
+        return cid, sec
+    saved = load(data_dir, "meta_app")
+    return saved.get("app_id", ""), saved.get("app_secret", "")
+
+
+def save_meta_app(data_dir: Path, app_id: str, app_secret: str) -> None:
+    app_id, app_secret = app_id.strip(), app_secret.strip()
+    if not app_id.isdigit():
+        raise ValueError("the Meta app ID is a number (App settings > Basic > App ID)")
+    if not (len(app_secret) >= 16 and app_secret.isalnum()):
+        raise ValueError("the Meta app secret looks wrong (App settings > Basic > App secret, after 'Show')")
+    save(data_dir, "meta_app", {"app_id": app_id, "app_secret": app_secret})
+
+
 def _token_kind_label(token: str) -> str:
     return "EAA (Facebook/system-user)" if token.startswith("EAA") else "IG (Instagram)" if token.startswith("IG") else "other"
 
@@ -291,7 +309,8 @@ def _meta_error(r: requests.Response | None) -> str:
 
 
 def find_instagram_account(token: str, *, ig_user_id: str = "", expected_username: str | None = None,
-                           session: requests.Session | None = None) -> tuple[dict | None, list[str]]:
+                           session: requests.Session | None = None,
+                           app: tuple[str, str] | None = None) -> tuple[dict | None, list[str]]:
     """Which Instagram professional account a Meta token opens, trying every supported route.
 
     The token goes only in the Authorization header (never in a URL, so it cannot leak into error text).
@@ -325,9 +344,21 @@ def find_instagram_account(token: str, *, ig_user_id: str = "", expected_usernam
     if me and me.get("username"):
         candidates.append({"graph": IG_GRAPH, "user_id": str(me.get("user_id") or me.get("id")),
                            "username": me["username"], "token_kind": "instagram_login"})
-    # 2) the token's own grants list the Instagram account IDs it may use
+    # 2) the token's own grants list the Instagram account IDs it may use. A system-user token cannot inspect
+    #    itself, so ask with the app's own credentials when they are saved (sent as a header, never in a URL).
     if not any(ok(c) for c in candidates):
-        dbg = get(f"{FB_GRAPH}/debug_token", {"input_token": token}, "graph.facebook.com/debug_token")
+        if app and app[0] and app[1]:
+            try:
+                r = http.get(f"{FB_GRAPH}/debug_token", params={"input_token": token},
+                             headers={"Authorization": f"Bearer {app[0]}|{app[1]}"}, timeout=30)
+                dbg = r.json() if r.status_code == 200 else None
+                if dbg is None:
+                    tried.append(f"graph.facebook.com/debug_token (app): {_meta_error(r)}")
+            except (requests.RequestException, ValueError) as ex:
+                tried.append(f"graph.facebook.com/debug_token (app): {type(ex).__name__}")
+                dbg = None
+        else:
+            dbg = get(f"{FB_GRAPH}/debug_token", {"input_token": token}, "graph.facebook.com/debug_token")
         ids: list[str] = []
         data = (dbg or {}).get("data") or {}
         for g in data.get("granular_scopes") or []:
@@ -349,11 +380,34 @@ def find_instagram_account(token: str, *, ig_user_id: str = "", expected_usernam
     if not any(ok(c) for c in candidates):
         pages = get(f"{FB_GRAPH}/me/accounts", {"fields": "instagram_business_account{id,username}", "limit": "100"},
                     "graph.facebook.com/me/accounts")
+        found_pages = 0
         for p in (pages or {}).get("data", []):
             a = p.get("instagram_business_account")
             if a and a.get("username"):
+                found_pages += 1
                 candidates.append({"graph": FB_GRAPH, "user_id": str(a["id"]), "username": a["username"],
                                    "token_kind": "facebook_user"})
+        if pages is not None and not found_pages:
+            tried.append("graph.facebook.com/me/accounts: no Facebook Page with an Instagram account")
+    # 5) accounts assigned to a system user directly, through the business portfolio
+    if not any(ok(c) for c in candidates):
+        biz = get(f"{FB_GRAPH}/me/businesses", {"fields": "id,name", "limit": "25"}, "graph.facebook.com/me/businesses")
+        for b in (biz or {}).get("data", []):
+            for edge in ("instagram_business_accounts", "owned_instagram_accounts"):
+                lst = get(f"{FB_GRAPH}/{b['id']}/{edge}", {"fields": "id,username", "limit": "100"},
+                          f"graph.facebook.com/<business>/{edge}")
+                for a in (lst or {}).get("data", []):
+                    if not a.get("username"):
+                        continue
+                    # confirm it is an Instagram professional account this token can use
+                    acc = get(f"{FB_GRAPH}/{a['id']}", {"fields": "id,username"}, f"graph.facebook.com/<account {a['id']}>")
+                    if acc and acc.get("username"):
+                        candidates.append({"graph": FB_GRAPH, "user_id": str(acc["id"]), "username": acc["username"],
+                                           "token_kind": "system_user"})
+                if any(ok(c) for c in candidates):
+                    break
+        if biz is not None and not (biz or {}).get("data"):
+            tried.append("graph.facebook.com/me/businesses: none visible to this token")
     match = [c for c in candidates if ok(c)]
     if match:
         return match[0], tried
@@ -376,14 +430,17 @@ def instagram_save_token(data_dir: Path, channel_key: str, token: str, *, ig_use
     if ig_user_id and not ig_user_id.isdigit():
         raise ValueError("the Instagram account ID is a number; leave it empty if you are not sure")
     found, tried = find_instagram_account(token, ig_user_id=ig_user_id, expected_username=expected_username,
-                                          session=http)
+                                          session=http, app=meta_app(data_dir))
     if found is None:
         others = [t for t in tried if t.startswith("found only")]
         if others:
             raise ValueError(f"this token does not open @{expected_username} ({others[0][len('found only: '):]}); "
                              "generate the token next to the right account")
+        hint = ("" if any(t.startswith("graph.facebook.com/debug_token (app)") for t in tried) else
+                " Next: save the Meta app ID and app secret (App settings > Basic) on this page, then try again; "
+                "Meta will then list the exact Instagram accounts this token was granted.")
         raise ValueError(f"Meta did not identify an Instagram account for this {_token_kind_label(token)} token. "
-                         "Tried: " + " | ".join(tried))
+                         "Tried: " + " | ".join(tried) + "." + hint)
     try:
         r = http.get(f"{found['graph']}/{found['user_id']}/content_publishing_limit",
                      params={"fields": "quota_usage,config"}, headers={"Authorization": f"Bearer {token}"}, timeout=30)

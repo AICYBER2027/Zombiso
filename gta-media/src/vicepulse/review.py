@@ -202,6 +202,15 @@ class ReviewApp:
                        '<input type=password name=token placeholder="paste the access token" required autocomplete=off>'
                        '<input type=text name=ig_user_id placeholder="Instagram account ID (optional)" style="max-width:220px">'
                        '<button class=approve>Check and save</button></form>')
+        app_ok = all(accounts.meta_app(self.settings.data_dir))
+        out.append('<p class=meta>Helper for system-user tokens: ' + (
+            'Meta app saved &#10003; (used only to ask Meta which accounts a token was granted).</p>' if app_ok else
+            'save the Meta app ID and app secret (<b>App settings &gt; Basic</b>) so VicePulse can ask Meta which '
+            'Instagram accounts a token was granted.</p>'
+            f'<form class=row method=post action="/accounts/meta-app">{csrf}'
+            '<input type=text name=app_id placeholder="Meta app ID" required style="max-width:220px">'
+            '<input type=password name=app_secret placeholder="Meta app secret" required autocomplete=off>'
+            '<button class=plain>Save app</button></form>'))
         out.append('</div><p class=meta><b>Option B - log in with Instagram</b> (Instagram Login apps):</p>')
         if not st["instagram_client"]:
             out.append(
@@ -377,6 +386,12 @@ def make_handler(app: ReviewApp):
                     accounts.save_youtube_client(app.settings.data_dir, form.get("client_id", ""),
                                                  form.get("client_secret", ""))
                     return self._redirect("/accounts?msg=" + quote("Google sign-in app saved. Now press Connect YouTube."))
+                except ValueError as ex:
+                    return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
+            if path == "/accounts/meta-app":
+                try:
+                    accounts.save_meta_app(app.settings.data_dir, form.get("app_id", ""), form.get("app_secret", ""))
+                    return self._redirect("/accounts?msg=" + quote("Meta app saved. Paste the token again."))
                 except ValueError as ex:
                     return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
             if path == "/accounts/instagram-token":
