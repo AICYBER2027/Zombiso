@@ -365,6 +365,12 @@ def find_instagram_account(token: str, *, ig_user_id: str = "", expected_usernam
             if g.get("scope", "").startswith("instagram"):
                 ids += [str(t) for t in g.get("target_ids") or []]
         kind = "system_user" if data.get("type") == "SYSTEM_USER" else "facebook_user"
+        if dbg is not None and app and app[0] and app[1]:
+            # report what Meta says this token holds (names and counts only, no secrets)
+            scopes = sorted(str(s) for s in data.get("scopes") or [])
+            tried.append(f"graph.facebook.com/debug_token (app) ok: type {data.get('type') or '?'}, "
+                         f"valid {bool(data.get('is_valid'))}, app {data.get('app_id') or '?'}, "
+                         f"permissions [{', '.join(scopes) or 'none'}], Instagram accounts granted {len(ids)}")
         for i in dict.fromkeys(([ig_user_id] if ig_user_id else []) + ids):
             acc = get(f"{FB_GRAPH}/{i}", {"fields": "id,username"}, f"graph.facebook.com/<account {i}>")
             if acc and acc.get("username"):
@@ -436,7 +442,11 @@ def instagram_save_token(data_dir: Path, channel_key: str, token: str, *, ig_use
         if others:
             raise ValueError(f"this token does not open @{expected_username} ({others[0][len('found only: '):]}); "
                              "generate the token next to the right account")
-        hint = ("" if any(t.startswith("graph.facebook.com/debug_token (app)") for t in tried) else
+        app_id, app_sec = meta_app(data_dir)
+        hint = (" Next: in Meta, generate the token again with instagram_basic and instagram_content_publish "
+                "(or instagram_business_basic and instagram_business_content_publish) ticked, and make sure the "
+                "Instagram account is assigned to the system user (Business settings > Users > System users > "
+                "Assign assets)." if app_id and app_sec else
                 " Next: save the Meta app ID and app secret (App settings > Basic) on this page, then try again; "
                 "Meta will then list the exact Instagram accounts this token was granted.")
         raise ValueError(f"Meta did not identify an Instagram account for this {_token_kind_label(token)} token. "
