@@ -443,7 +443,12 @@ def instagram_save_token(data_dir: Path, channel_key: str, token: str, *, ig_use
             raise ValueError(f"this token does not open @{expected_username} ({others[0][len('found only: '):]}); "
                              "generate the token next to the right account")
         app_id, app_sec = meta_app(data_dir)
-        hint = (" Next: in Meta, generate the token again with instagram_basic and instagram_content_publish "
+        sys_ok = any("type SYSTEM_USER, valid True" in t and "instagram_content_publish" in t for t in tried)
+        hint = (" Next: this system-user token is valid and may publish, but Meta does not list its Instagram "
+                "accounts (system-user grants usually carry no account list). Use the per-channel row instead and "
+                "type the Instagram account ID (Business settings > Accounts > Instagram accounts > click the account; "
+                "the ID is shown there)." if sys_ok and not ig_user_id else
+                " Next: in Meta, generate the token again with instagram_basic and instagram_content_publish "
                 "(or instagram_business_basic and instagram_business_content_publish) ticked, and make sure the "
                 "Instagram account is assigned to the system user (Business settings > Users > System users > "
                 "Assign assets)." if app_id and app_sec else
