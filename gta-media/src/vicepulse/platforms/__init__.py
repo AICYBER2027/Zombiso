@@ -37,7 +37,16 @@ def make_publisher(platform: str, channel_key: str, *, audited: bool = False) ->
             graph = accounts.instagram_graph(data_dir, channel_key)
         return InstagramPublisher(user_id=user_id, access_token=token, graph=graph)
     if platform == "tiktok":
-        return TikTokPublisher(access_token=platform_secret("tiktok", channel_key, "access_token"), audited=audited)
+        token = platform_secret("tiktok", channel_key, "access_token")
+        if not token:
+            from .. import accounts
+            from ..config import Settings
+
+            try:
+                token = accounts.tiktok_credentials(Settings().data_dir, channel_key)
+            except ValueError as e:
+                raise PlatformError(str(e)) from None
+        return TikTokPublisher(access_token=token, audited=audited)
     raise PlatformError(f"unknown platform {platform}")
 
 

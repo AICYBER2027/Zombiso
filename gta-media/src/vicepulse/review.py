@@ -64,6 +64,19 @@ class ReviewApp:
         # and paste the address from the browser after signing in.
         return (os.environ.get("VICEPULSE_INSTAGRAM_REDIRECT") or f"{self.public_url}/oauth/instagram/callback").rstrip("/")
 
+    @property
+    def tiktok_redirect(self) -> str:
+        # TikTok only accepts https redirect addresses. This local page is plain http, so the browser shows an
+        # error page after TikTok sends you back; you paste that address (it carries the code) into the page.
+        # VICEPULSE_TIKTOK_REDIRECT overrides it (for example a page on your own website).
+        default = self.public_url.replace("http://", "https://", 1) + "/oauth/tiktok/callback"
+        return (os.environ.get("VICEPULSE_TIKTOK_REDIRECT") or default).rstrip("/")
+
+    @property
+    def tiktok_test_posts(self) -> bool:
+        """Private (SELF_ONLY) test uploads from the TikTok screen; off unless switched on in .env."""
+        return os.environ.get("VICEPULSE_TIKTOK_TEST_POSTS", "0") == "1"
+
     # ------------------------------------------------------------------ pages
     def page(self, title: str, body: str, tab: str, msg: str = "", err: bool = False) -> str:
         s = self.settings
@@ -112,6 +125,8 @@ class ReviewApp:
                            f'<button class=reject name=decision value=reject>Reject</button></form>')
             else:
                 actions = f'<div class=meta>{e(c["status"])} by {e(c["approved_by"])} {e(c["status_reason"] or "")}</div>'
+                if c["status"] in ("approved", "scheduled", "published") and first:
+                    actions += f'<a class=tag href="/tiktok/post/{c["id"]}">Post to TikTok (private test)</a>'
             cards.append(
                 f'<div class=card>{video}<div class=title>{e(yt.get("title") or script.get("hook") or "")}</div>'
                 f'<div class=meta><span class=tag>{e(c["channel_key"]).upper()}</span><span class=tag>clip {c["id"]}</span>'
@@ -185,8 +200,75 @@ class ReviewApp:
                    'VicePulse EN and the BR channel for VicePulse BR. If one Google account owns both, Google asks '
                    'which channel to use.</p>')
         out.append(self.instagram_section(st, csrf))
-        out.append('<h3>TikTok</h3><p class=meta>Coming next.</p>')
+        out.append(self.tiktok_section(st, csrf))
         return "".join(out)
+
+    def tiktok_section(self, st: dict, csrf: str) -> str:
+        out = ['<h3>TikTok</h3>']
+        if not st["tiktok_client"]:
+            out.append(
+                '<div class=card><b>Step 1 - TikTok app</b><p class=meta>In the TikTok Developer Portal, open your app '
+                '(or its <b>Sandbox</b>), add <b>Login Kit</b> (platform: Web) and <b>Content Posting API</b> with '
+                '<b>Direct Post</b> on, tick the scopes <b>user.info.basic</b> and <b>video.publish</b>, and add this '
+                f'exact <b>Redirect URI</b>:</p><p><code>{e(self.tiktok_redirect)}</code></p>'
+                '<p class=meta>Then copy the <b>Client key</b> and <b>Client secret</b> (App details &gt; Credentials) '
+                'and paste them here:</p>'
+                f'<form class=row method=post action="/accounts/tiktok-client">{csrf}'
+                '<input type=text name=client_key placeholder="Client key" required style="max-width:260px">'
+                '<input type=password name=client_secret placeholder="Client secret" required autocomplete=off>'
+                '<button class=approve>Save</button></form></div>')
+        else:
+            out.append(f'<p class=meta>TikTok app: ready. Redirect URI: <code>{e(self.tiktok_redirect)}</code></p>')
+        rows = ['<table><tr><th>VicePulse channel</th><th>TikTok account</th><th></th></tr>']
+        for key, t in st["tiktok"].items():
+            if t["connected"]:
+                ok = not t.get("expected") or (t.get("username") or "").lower() == t["expected"].lower().lstrip("@")
+                life = (f' &middot; login renews itself ({t["renew_days_left"]} days before you must reconnect)'
+                        if t.get("renew_days_left") is not None else "")
+                who = (f'connected: <b>{e(t.get("nickname") or "")}</b> @{e(t.get("username") or "")} '
+                       f'{"&#10003;" if ok else "(expected @" + e(t["expected"]) + ")"}{life}')
+            else:
+                who = "not connected" + (f' (expected @{e(t["expected"])})' if t.get("expected") else "")
+            btn = ""
+            if st["tiktok_client"]:
+                label = "Reconnect" if t["connected"] else "Connect TikTok"
+                btn = (f'<form method=post action="/accounts/tiktok-start">{csrf}<input type=hidden name=channel '
+                       f'value="{e(key)}"><button class={"plain" if t["connected"] else "approve"}>{label}</button></form>')
+            rows.append(f'<tr><td><b>{e(t["name"])}</b> <span class=tag>{e(key).upper()}</span></td><td>{who}</td><td>{btn}</td></tr>')
+        rows.append("</table>")
+        out.append("".join(rows))
+        if st["tiktok_client"]:
+            out.append(
+                '<p class=meta>Press Connect, log in with the TikTok account for that channel and allow access. '
+                'TikTok then sends you to an https address this page cannot open, so the browser shows an error page: '
+                'copy the whole address from the address bar and paste it here:</p>'
+                f'<form class=row method=post action="/accounts/tiktok-paste">{csrf}'
+                f'<input type=text name=url placeholder="{e(self.tiktok_redirect)}?code=..." required>'
+                '<button class=plain>Finish connecting</button></form>'
+                '<p class=meta>Connecting never posts. To try a private test post, open a clip under <b>Reviewed</b> '
+                'and press <b>Post to TikTok</b>.</p>')
+        return "".join(out)
+
+    def tiktok_start(self, form: dict) -> str:
+        channel = form.get("channel", "")
+        if channel not in {c["key"] for c in self.settings.channels()}:
+            raise ValueError("unknown channel")
+        state = secrets.token_urlsafe(24)
+        self.oauth_states[state] = "tiktok:" + channel
+        return accounts.tiktok_auth_url(self.settings.data_dir, self.tiktok_redirect, state)
+
+    def tiktok_callback(self, q: dict, session=None) -> str:
+        if q.get("error"):
+            raise ValueError(f"TikTok sign-in was cancelled ({q.get('error_description') or q['error']})")
+        tagged = self.oauth_states.pop(q.get("state", ""), "")
+        if not tagged.startswith("tiktok:"):
+            raise ValueError("this sign-in link expired; press Connect TikTok again")
+        channel = tagged.split(":", 1)[1]
+        info = accounts.tiktok_connect(self.settings.data_dir, channel, q.get("code", ""), self.tiktok_redirect,
+                                       expected_username=self.settings.channel(channel).get("tiktok_username"),
+                                       session=session)
+        return (f"TikTok connected for {channel.upper()}: {info['nickname'] or ''} @{info['username']} "
+                f"(permissions: {', '.join(info['scope'])}). Nothing was posted.")
 
     def instagram_section(self, st: dict, csrf: str) -> str:
         out = ['<h3>Instagram</h3>',
@@ -295,6 +377,179 @@ class ReviewApp:
                                         session=session)
         return f"YouTube connected for {channel.upper()}: {info['channel_title']}. Nothing was published."
 
+    # ------------------------------------------------------------------ TikTok posting screen
+    # Built to TikTok's Content Sharing Guidelines: the account's nickname is shown, the privacy level comes from
+    # the account's own options with nothing pre-selected, comments/Duet/Stitch start unticked, commercial content
+    # starts off, the music consent statement sits above the button, a preview is shown, and the video is sent only
+    # after the person presses Post. Uploads are private (SELF_ONLY) test posts behind VICEPULSE_TIKTOK_TEST_POSTS.
+
+    def _tiktok_clip(self, conn, clip_id: int) -> dict:
+        row = conn.execute(
+            """SELECT cl.id, cl.status, cl.titles, cl.language, ch.key AS channel_key
+               FROM clips cl JOIN channels ch ON ch.id = cl.channel_id WHERE cl.id = %s""", (clip_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"clip {clip_id} not found")
+        if row["status"] not in ("approved", "scheduled", "published"):
+            raise ValueError(f"clip {clip_id} is {row['status']}; approve it first")
+        renders = {r["platform"]: r for r in conn.execute(
+            "SELECT platform, file_path, duration_s FROM renders WHERE clip_id = %s", (clip_id,)).fetchall()}
+        render = renders.get("tiktok") or next((renders[p] for p in PLATFORM_ORDER if p in renders), None)
+        if render is None:
+            raise ValueError(f"clip {clip_id} has no rendered video")
+        return {**row, "render": render, "render_platform": next(p for p in ("tiktok", *PLATFORM_ORDER) if p in renders)}
+
+    def _tiktok_token(self, channel_key: str, session=None) -> str:
+        token = accounts.tiktok_credentials(self.settings.data_dir, channel_key, session=session)
+        if not token:
+            raise ValueError(f"TikTok is not connected for {channel_key.upper()}; connect it on the Accounts page")
+        return token
+
+    def tiktok_post_page(self, conn, clip_id: int, session=None) -> str:
+        clip = self._tiktok_clip(conn, clip_id)
+        key = clip["channel_key"]
+        info = accounts.tiktok_creator_info(self._tiktok_token(key, session), session=session)
+        copy = (clip["titles"] or {}).get("tiktok") or (clip["titles"] or {}).get("youtube") or {}
+        caption = "\n\n".join(x for x in (copy.get("title"), copy.get("description"),
+                                          " ".join(copy.get("hashtags") or [])) if x)[:2200]
+        labels = {"PUBLIC_TO_EVERYONE": "Everyone", "MUTUAL_FOLLOW_FRIENDS": "Friends",
+                  "FOLLOWER_OF_CREATOR": "Followers", "SELF_ONLY": "Only me"}
+        opts = "".join(
+            f'<option value="{e(p)}"{"" if p == "SELF_ONLY" else " disabled"}>{e(labels.get(p, p))}'
+            f'{"" if p == "SELF_ONLY" else " (after TikTok approves the app)"}</option>'
+            for p in info.get("privacy_level_options") or [])
+        max_s = info.get("max_video_post_duration_sec")
+        dur = clip["render"]["duration_s"]
+        too_long = bool(max_s and dur and float(dur) > float(max_s))
+
+        def box(name: str, label: str, off: bool) -> str:
+            return (f'<label class=meta><input type=checkbox name={name} value=1{" disabled" if off else ""}> {label}'
+                    f'{" (turned off in this account&#39;s TikTok settings)" if off else ""}</label>')
+
+        avatar = (f'<img src="{e(info["creator_avatar_url"])}" alt="" width=40 height=40 style="border-radius:50%">'
+                  if info.get("creator_avatar_url") else "")
+        switch = ("" if self.tiktok_test_posts else
+                  '<div class="msg err">Test posting is switched off, so the Post button will not send anything. '
+                  'To record the demo, set <code>VICEPULSE_TIKTOK_TEST_POSTS=1</code> in <code>.env</code> and restart '
+                  'the review page.</div>')
+        warn = (f'<div class="msg err">This video is {float(dur):.0f}s; this account can post at most {max_s}s.</div>'
+                if too_long else "")
+        return f"""{switch}{warn}
+<div class=card style="max-width:760px">
+ <div style="display:flex;gap:10px;align-items:center">{avatar}<div><b>Posting to: {e(info.get("creator_nickname") or "")}</b>
+  <div class=meta>@{e(info.get("creator_username") or "")} &middot; VicePulse {e(key).upper()} &middot; clip {clip_id}</div></div></div>
+ <div style="display:grid;grid-template-columns:minmax(0,240px) 1fr;gap:16px">
+  <video controls preload=metadata src="/media/{clip_id}/{e(clip["render_platform"])}"></video>
+  <form method=post action="/tiktok/post" id=ttform style="display:flex;flex-direction:column;gap:10px">
+   <input type=hidden name=csrf value="{self.token}"><input type=hidden name=clip value="{clip_id}">
+   <label class=meta>Caption (you can edit it)<br><textarea name=caption maxlength=2200 rows=6
+     style="width:100%;background:#0c0e12;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px">{e(caption)}</textarea></label>
+   <label class=meta>Who can view this video<br><select name=privacy_level id=privacy required
+     style="padding:8px;border-radius:8px;background:#0c0e12;color:var(--text);border:1px solid var(--line)">
+     <option value="" selected disabled>Choose who can view</option>{opts}</select></label>
+   <div><div class=meta>Allow users to:</div>
+    {box("allow_comment", "Comment", bool(info.get("comment_disabled")))}
+    {box("allow_duet", "Duet", bool(info.get("duet_disabled")))}
+    {box("allow_stitch", "Stitch", bool(info.get("stitch_disabled")))}</div>
+   <div><label class=meta><input type=checkbox name=disclose id=disclose value=1> Disclose video content
+     (turn on if this video promotes yourself, a brand, product or service)</label>
+    <div id=discl style="display:none;margin-left:22px">
+     <label class=meta><input type=checkbox name=your_brand id=yb value=1> Your brand
+       - you are promoting yourself or your own business (labelled "Promotional content")</label><br>
+     <label class=meta><input type=checkbox name=branded_content id=bc value=1> Branded content
+       - you are promoting another brand or a third party (labelled "Paid partnership")</label>
+     <div class=meta id=bcnote style="display:none">Branded content can't be private, so it can't be posted until the
+       app is approved for public posts.</div></div></div>
+   <p class=meta id=consent>By posting, you agree to TikTok's
+     <a href="https://www.tiktok.com/legal/page/global/music-usage-confirmation/en" target=_blank rel=noopener>Music Usage Confirmation</a>.</p>
+   <button class=approve id=postbtn disabled>Post to TikTok</button>
+   <p class=meta>After you press Post, the video is uploaded to TikTok. It can take a few minutes to process before
+     it shows on the profile.</p>
+  </form></div></div>
+<script>
+(function(){{var f=document.getElementById('ttform'),p=document.getElementById('privacy'),d=document.getElementById('disclose'),
+ box=document.getElementById('discl'),yb=document.getElementById('yb'),bc=document.getElementById('bc'),
+ note=document.getElementById('bcnote'),c=document.getElementById('consent'),b=document.getElementById('postbtn');
+ var mu='<a href="https://www.tiktok.com/legal/page/global/music-usage-confirmation/en" target=_blank rel=noopener>Music Usage Confirmation</a>',
+     bp='<a href="https://www.tiktok.com/legal/page/global/bc-policy/en" target=_blank rel=noopener>Branded Content Policy</a>';
+ function upd(){{box.style.display=d.checked?'block':'none';
+  var branded=d.checked&&bc.checked;note.style.display=branded?'block':'none';
+  c.innerHTML='By posting, you agree to TikTok\\'s '+(branded?bp+' and ':'')+mu+'.';
+  b.disabled=!p.value||(d.checked&&!yb.checked&&!bc.checked)||(branded&&p.value==='SELF_ONLY')||{str(too_long).lower()};}}
+ f.addEventListener('change',upd);upd();}})();
+</script>"""
+
+    def tiktok_post(self, conn, form: dict, session=None) -> str:
+        """Upload one private test post after the person's explicit choices. Returns the publish_id."""
+        from datetime import date
+
+        from . import rights
+        from .platforms import PlatformError, PublishRequest
+        from .platforms.tiktok import TikTokPublisher
+
+        clip = self._tiktok_clip(conn, int(form.get("clip", "0")))
+        privacy = form.get("privacy_level", "")
+        if not privacy:
+            raise ValueError("choose who can view the video")
+        if privacy != "SELF_ONLY":
+            raise ValueError("only 'Only me' (private) posts are allowed until TikTok approves the app")
+        disclose = form.get("disclose") == "1"
+        your_brand, branded = disclose and form.get("your_brand") == "1", disclose and form.get("branded_content") == "1"
+        if disclose and not (your_brand or branded):
+            raise ValueError("you turned on content disclosure: choose Your brand and/or Branded content")
+        if branded:
+            raise ValueError("branded content can't be private, so it can't be posted as a test")
+        caption = form.get("caption", "").strip()[:2200]
+        if not self.tiktok_test_posts:
+            raise ValueError("test posting is switched off (VICEPULSE_TIKTOK_TEST_POSTS=1 in .env turns it on); "
+                             "nothing was sent")
+        gate = rights.prepublish_gate(conn, clip["id"], "tiktok", on=date.today(), monetised=self.settings.monetised)
+        if not gate.ok:
+            raise ValueError("rights check failed: " + "; ".join(gate.reasons))
+        pub = TikTokPublisher(access_token=self._tiktok_token(clip["channel_key"], session), audited=False,
+                              session=session)
+        req = PublishRequest(file_path=Path(clip["render"]["file_path"]), title=caption, description="", hashtags=[],
+                             language=clip["language"], synthetic_media=self.settings.voice_mode == "synthetic",
+                             options={"privacy_level": privacy, "allow_comment": form.get("allow_comment") == "1",
+                                      "allow_duet": form.get("allow_duet") == "1",
+                                      "allow_stitch": form.get("allow_stitch") == "1",
+                                      "consent_confirmed": True, "your_brand": your_brand, "branded_content": False})
+        try:
+            result = pub.publish(req)
+        except PlatformError as ex:
+            db.log_event(conn, "tiktok_test_post", "clip", clip["id"], "failed", {"error": str(ex)[:300]})
+            conn.commit()
+            raise ValueError(f"TikTok upload failed: {ex}") from None
+        db.log_event(conn, "tiktok_test_post", "clip", clip["id"], "uploaded",
+                     {"publish_id": result.external_id, "privacy": privacy, "channel": clip["channel_key"]})
+        conn.commit()
+        return result.external_id
+
+    def tiktok_status_page(self, channel_key: str, publish_id: str, session=None) -> str:
+        from .platforms import PlatformError
+        from .platforms.tiktok import TikTokPublisher
+
+        if channel_key not in {c["key"] for c in self.settings.channels()}:
+            raise ValueError("unknown channel")
+        if not publish_id or len(publish_id) > 128 or not all(ch.isalnum() or ch in "._-~" for ch in publish_id):
+            raise ValueError("bad publish id")
+        try:
+            st = TikTokPublisher(access_token=self._tiktok_token(channel_key, session), session=session).status(publish_id)
+        except PlatformError as ex:
+            raise ValueError(f"could not read the post status: {ex}") from None
+        state = st.get("status") or "UNKNOWN"
+        done = state in ("PUBLISH_COMPLETE", "FAILED", "SEND_TO_USER_INBOX")
+        text = {"PROCESSING_UPLOAD": "TikTok is receiving the video...",
+                "PROCESSING_DOWNLOAD": "TikTok is fetching the video...",
+                "SEND_TO_USER_INBOX": "Sent to the TikTok app inbox to finish there.",
+                "PUBLISH_COMPLETE": "Done. The video is on the account as a private (Only me) post.",
+                "FAILED": f"TikTok could not post it: {st.get('fail_reason') or 'no reason given'}"}.get(state, state)
+        refresh = "" if done else '<script>setTimeout(function(){location.reload()},5000)</script>'
+        return (f'{refresh}<div class=card style="max-width:640px"><b>{e(text)}</b>'
+                f'<div class=meta>Status: {e(state)} &middot; VicePulse {e(channel_key).upper()} &middot; '
+                f'publish id {e(publish_id)}</div>'
+                + ('' if done else '<div class=meta>Processing can take a few minutes. This page checks again every '
+                   '5 seconds.</div>') + '<p><a href="/done">Back to reviewed clips</a></p></div>')
+
     # ------------------------------------------------------------------ actions
     def decide(self, conn, form: dict) -> str:
         clip = int(form["clip"])
@@ -350,6 +605,28 @@ def make_handler(app: ReviewApp):
                     return self._redirect(f"/accounts?msg={quote(done)}")
                 except (ValueError, KeyError, OSError) as ex:
                     return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
+            if url.path == "/oauth/tiktok/callback":     # only reached if the redirect address opens this page
+                from urllib.parse import quote
+                try:
+                    done = app.tiktok_callback({k: v[0] for k, v in q.items()}, session=getattr(app, "http", None))
+                    return self._redirect(f"/accounts?msg={quote(done)}")
+                except (ValueError, KeyError, OSError) as ex:
+                    return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
+            if url.path.startswith("/tiktok/post/") or url.path == "/tiktok/status":
+                from urllib.parse import quote
+                try:
+                    if url.path == "/tiktok/status":
+                        body = app.tiktok_status_page((q.get("channel") or [""])[0], (q.get("id") or [""])[0],
+                                                      session=getattr(app, "http", None))
+                        return self._send(200, app.page("TikTok post status", body, "done", msg, err).encode())
+                    tail = url.path.rsplit("/", 1)[1]
+                    if not tail.isdigit():
+                        return self._send(404, b"not found", "text/plain")
+                    with db.connect(app.settings) as conn:
+                        body = app.tiktok_post_page(conn, int(tail), session=getattr(app, "http", None))
+                    return self._send(200, app.page("Post to TikTok", body, "done", msg, err).encode())
+                except (ValueError, KeyError, OSError) as ex:
+                    return self._redirect(f"/done?err=1&msg={quote(str(ex))}")
             if url.path == "/oauth/youtube/callback":
                 from urllib.parse import quote
                 try:
@@ -443,6 +720,31 @@ def make_handler(app: ReviewApp):
                     return self._redirect(f"/accounts?msg={quote(done)}")
                 except (ValueError, KeyError, OSError) as ex:
                     return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
+            if path in ("/accounts/tiktok-client", "/accounts/tiktok-start", "/accounts/tiktok-paste"):
+                try:
+                    if path == "/accounts/tiktok-client":
+                        accounts.save_tiktok_client(app.settings.data_dir, form.get("client_key", ""),
+                                                    form.get("client_secret", ""))
+                        return self._redirect("/accounts?msg=" + quote("TikTok app saved. Now press Connect TikTok."))
+                    if path == "/accounts/tiktok-start":
+                        return self._redirect(app.tiktok_start(form))
+                    done = app.tiktok_callback(accounts.code_from_pasted_url(form.get("url", "")),
+                                               session=getattr(app, "http", None))
+                    return self._redirect(f"/accounts?msg={quote(done)}")
+                except (ValueError, KeyError, OSError) as ex:
+                    return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
+            if path == "/tiktok/post":
+                clip = form.get("clip", "")
+                try:
+                    with db.connect(app.settings) as conn:
+                        pid = app.tiktok_post(conn, form, session=getattr(app, "http", None))
+                        key = conn.execute("SELECT ch.key FROM clips cl JOIN channels ch ON ch.id = cl.channel_id "
+                                           "WHERE cl.id = %s", (int(clip),)).fetchone()["key"]
+                    return self._redirect(f"/tiktok/status?channel={quote(key)}&id={quote(pid)}&msg="
+                                          + quote("Uploaded to TikTok as a private (Only me) post."))
+                except (ValueError, KeyError, OSError) as ex:
+                    where = f"/tiktok/post/{int(clip)}" if clip.isdigit() else "/done"
+                    return self._redirect(f"{where}?err=1&msg={quote(str(ex))}")
             if path == "/accounts/youtube-start":
                 try:
                     return self._redirect(app.youtube_start(form))

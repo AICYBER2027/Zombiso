@@ -137,6 +137,8 @@ def status(settings: Settings) -> dict:
            "youtube_client_from_env": bool(os.environ.get("YOUTUBE_CLIENT_ID")), "youtube": {}}
     ic, isec = instagram_client(settings.data_dir)
     out["instagram_client"] = bool(ic and isec)
+    tc, tsec = tiktok_client(settings.data_dir)
+    out["tiktok_client"] = bool(tc and tsec)
     out["instagram"] = {}
     for ch in settings.channels():
         key = ch["key"]
@@ -148,6 +150,12 @@ def status(settings: Settings) -> dict:
                                  "user_id": ig.get("user_id"),
                                  "days_left": (max(0, (ig["expires_at"] - int(time.time())) // 86400)
                                                if ig.get("expires_at") else None)}
+        tt = load(settings.data_dir, f"tiktok_{key}")
+        out.setdefault("tiktok", {})[key] = {
+            "name": ch.get("name", key), "connected": bool(tt.get("access_token")), "username": tt.get("username"),
+            "nickname": tt.get("nickname"), "expected": ch.get("tiktok_username"),
+            "renew_days_left": (max(0, (tt["refresh_expires_at"] - int(time.time())) // 86400)
+                                if tt.get("refresh_expires_at") else None)}
         env = bool(os.environ.get(f"YOUTUBE_REFRESH_TOKEN_{key.upper()}"))
         saved = load(settings.data_dir, f"youtube_{key}")
         out["youtube"][key] = {"name": ch.get("name", key), "connected": env or bool(saved.get("refresh_token")),
@@ -473,6 +481,134 @@ def instagram_save_token(data_dir: Path, channel_key: str, token: str, *, ig_use
             "graph": found["graph"], "publish_permission": True}
 
 
+# ---------------------------------------------------------------- TikTok (Login Kit for Web + Content Posting API)
+
+TT_AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/"
+TT_API = "https://open.tiktokapis.com"
+TT_TOKEN_URL = f"{TT_API}/v2/oauth/token/"
+TIKTOK_SCOPES = ["user.info.basic", "video.publish"]
+TT_REFRESH_WITHIN_S = 10 * 60          # access tokens are short-lived; renew when <10 minutes remain
+
+
+def tiktok_client(data_dir: Path) -> tuple[str, str]:
+    cid, sec = os.environ.get("TIKTOK_CLIENT_KEY", ""), os.environ.get("TIKTOK_CLIENT_SECRET", "")
+    if cid and sec:
+        return cid, sec
+    saved = load(data_dir, "tiktok_client")
+    return saved.get("client_key", ""), saved.get("client_secret", "")
+
+
+def save_tiktok_client(data_dir: Path, client_key: str, client_secret: str) -> None:
+    client_key, client_secret = client_key.strip(), client_secret.strip()
+    if not (8 <= len(client_key) <= 64 and client_key.isalnum()):
+        raise ValueError("the TikTok client key looks wrong (letters and digits, shown under App details > Credentials)")
+    if not (16 <= len(client_secret) <= 128) or any(c.isspace() for c in client_secret):
+        raise ValueError("the TikTok client secret looks wrong (shown under App details > Credentials)")
+    save(data_dir, "tiktok_client", {"client_key": client_key, "client_secret": client_secret})
+
+
+def tiktok_auth_url(data_dir: Path, redirect_uri: str, state: str) -> str:
+    cid, _ = tiktok_client(data_dir)
+    if not cid:
+        raise ValueError("add the TikTok client key and secret first")
+    # disable_auto_auth=1 always shows TikTok's consent screen, so the right account can be picked per channel.
+    return TT_AUTH_URL + "?" + urlencode({"client_key": cid, "response_type": "code", "scope": ",".join(TIKTOK_SCOPES),
+                                          "redirect_uri": redirect_uri, "state": state, "disable_auto_auth": "1"})
+
+
+def _tt_json(r: requests.Response, what: str) -> dict:
+    try:
+        data = r.json()
+    except ValueError:
+        data = {}
+    err = data.get("error") if isinstance(data, dict) else None
+    # OAuth endpoints answer {"error": "invalid_grant", "error_description": ...}; the API answers
+    # {"error": {"code": "ok" | "...", "message": ...}}.
+    if isinstance(err, dict):
+        bad = err.get("code") not in (None, "", "ok")
+        msg = err.get("message") or err.get("code")
+    else:
+        bad, msg = bool(err), data.get("error_description") or err
+    if r.status_code != 200 or bad:
+        raise ValueError(f"TikTok refused the {what} ({r.status_code}): {msg or r.text[:200]}")
+    return data
+
+
+def tiktok_creator_info(token: str, session: requests.Session | None = None) -> dict:
+    """The posting account as TikTok's Content Posting API sees it (needs video.publish). Read-only."""
+    http = session or requests.Session()
+    try:
+        r = http.post(f"{TT_API}/v2/post/publish/creator_info/query/", timeout=30,
+                      headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=UTF-8"})
+    except requests.RequestException as ex:
+        raise ValueError(f"could not reach TikTok ({type(ex).__name__}); try again") from None
+    return _tt_json(r, "creator info").get("data") or {}
+
+
+def tiktok_connect(data_dir: Path, channel_key: str, code: str, redirect_uri: str, *, expected_username: str | None = None,
+                   session: requests.Session | None = None) -> dict:
+    """Code -> access + refresh token; confirm video.publish and which account it is; save. Nothing is posted."""
+    http = session or requests.Session()
+    cid, sec = tiktok_client(data_dir)
+    if not (cid and sec):
+        raise ValueError("add the TikTok client key and secret first")
+    try:
+        tok = _tt_json(http.post(TT_TOKEN_URL, timeout=30, headers={"Content-Type": "application/x-www-form-urlencoded"},
+                                 data={"client_key": cid, "client_secret": sec, "code": code.strip(),
+                                       "grant_type": "authorization_code", "redirect_uri": redirect_uri}), "sign-in code")
+    except requests.RequestException as ex:
+        raise ValueError(f"could not reach TikTok ({type(ex).__name__}); try again") from None
+    granted = [s.strip() for s in str(tok.get("scope") or "").split(",") if s.strip()]
+    if "video.publish" not in granted:
+        raise ValueError("TikTok did not grant video.publish; connect again and allow posting "
+                         "(and check that Content Posting API is added to the app)")
+    info = tiktok_creator_info(tok["access_token"], session=http)
+    username = info.get("creator_username") or ""
+    if expected_username and username.lower() != expected_username.lower().lstrip("@"):
+        raise ValueError(f"you signed in as @{username}, but {channel_key.upper()} expects @{expected_username}; "
+                         "log out of TikTok in the browser (or use a private window) and connect again")
+    now = int(time.time())
+    save(data_dir, f"tiktok_{channel_key}", {
+        "access_token": tok["access_token"], "refresh_token": tok.get("refresh_token", ""),
+        "expires_at": now + int(tok.get("expires_in") or 0),
+        "refresh_expires_at": now + int(tok.get("refresh_expires_in") or 0),
+        "open_id": tok.get("open_id"), "scope": granted, "username": username,
+        "nickname": info.get("creator_nickname"), "connected_at": now})
+    return {"username": username, "nickname": info.get("creator_nickname"), "scope": granted}
+
+
+def tiktok_credentials(data_dir: Path, channel_key: str, session: requests.Session | None = None) -> str:
+    """A valid access token for the channel's TikTok account, renewing it when needed ('' if not connected).
+
+    TikTok rotates refresh tokens: every refresh returns a new one and invalidates the old, so it is saved at once.
+    """
+    info = load(data_dir, f"tiktok_{channel_key}")
+    if not info.get("access_token"):
+        return ""
+    now = int(time.time())
+    if info.get("expires_at", 0) - now > TT_REFRESH_WITHIN_S:
+        return info["access_token"]
+    cid, sec = tiktok_client(data_dir)
+    if not (info.get("refresh_token") and cid and sec):
+        raise ValueError(f"the TikTok login for {channel_key.upper()} expired; press Reconnect on the Accounts page")
+    http = session or requests.Session()
+    try:
+        new = _tt_json(http.post(TT_TOKEN_URL, timeout=30, headers={"Content-Type": "application/x-www-form-urlencoded"},
+                                 data={"client_key": cid, "client_secret": sec, "grant_type": "refresh_token",
+                                       "refresh_token": info["refresh_token"]}), "login renewal")
+    except requests.RequestException as ex:
+        raise ValueError(f"could not reach TikTok to renew the login ({type(ex).__name__}); try again") from None
+    except ValueError:
+        raise ValueError(f"the TikTok login for {channel_key.upper()} could not be renewed; press Reconnect on the "
+                         "Accounts page") from None
+    info.update(access_token=new["access_token"], refresh_token=new.get("refresh_token") or info["refresh_token"],
+                expires_at=now + int(new.get("expires_in") or 0))
+    if new.get("refresh_expires_in"):
+        info["refresh_expires_at"] = now + int(new["refresh_expires_in"])
+    save(data_dir, f"tiktok_{channel_key}", info)
+    return info["access_token"]
+
+
 def verify(settings: Settings, session: requests.Session | None = None) -> dict:
     """Ask Google and Meta which account each stored login opens, and compare with the channel config.
 
@@ -524,4 +660,27 @@ def verify(settings: Settings, session: requests.Session | None = None) -> dict:
                                      "token_kind": load(settings.data_dir, f"instagram_{key}").get("token_kind")}
         except (ValueError, requests.RequestException) as e:
             out["instagram"][key] = {"connected": True, "ok": False, "error": type(e).__name__}
+    out["tiktok"] = {}
+    for ch in settings.channels():
+        key, want = ch["key"], ch.get("tiktok_username")
+        try:
+            tt_token = tiktok_credentials(settings.data_dir, key, session=http)
+        except ValueError as e:
+            out["tiktok"][key] = {"connected": True, "ok": False, "error": str(e)}
+            continue
+        if not tt_token:
+            out["tiktok"][key] = {"connected": False, "expected": want}
+            continue
+        try:
+            info = tiktok_creator_info(tt_token, session=http)
+            name = info.get("creator_username")
+            out["tiktok"][key] = {"connected": True, "username": name, "nickname": info.get("creator_nickname"),
+                                  "expected": want,
+                                  "matches_expected": (name or "").lower() == want.lower().lstrip("@") if want else None,
+                                  "publish_permission": True,      # creator_info answers only with video.publish
+                                  "privacy_options": info.get("privacy_level_options"),
+                                  "account_private": "PUBLIC_TO_EVERYONE" not in (info.get("privacy_level_options") or []),
+                                  "max_video_seconds": info.get("max_video_post_duration_sec")}
+        except ValueError as e:
+            out["tiktok"][key] = {"connected": True, "ok": False, "error": str(e)}
     return out
