@@ -93,11 +93,13 @@ def _facecam(text: str | None) -> dict | None:
     """'x,y,w,h' (fractions of the source frame, e.g. 0.02,0.6,0.25,0.35) plus optional ':split' or ':pip'."""
     if not text:
         return None
+    if text == "auto":
+        return "auto"
     box, _, mode = text.partition(":")
     x, y, w, h = (float(v) for v in box.split(","))
     if not (0 <= x < 1 and 0 <= y < 1 and 0 < w <= 1 - x + 1e-6 and 0 < h <= 1 - y + 1e-6):
         raise ValueError("--facecam must be x,y,w,h fractions inside the frame")
-    return {"x": x, "y": y, "w": w, "h": h, "mode": mode or "pip"}
+    return {"x": x, "y": y, "w": w, "h": h, "mode": mode or "auto"}
 
 
 def cmd_style_compare(a, s, conn):
@@ -122,6 +124,11 @@ def cmd_style_compare(a, s, conn):
             raise ValueError("--file needs --own-test-footage (you made it yourself), or use --clip for licensed footage")
         src, in_s, out_s = a.file, a.start, a.end
         cues = json.loads(open(a.captions_json, encoding="utf-8").read()) if a.captions_json else []
+        if a.transcribe and not cues:
+            # The clip's real speech as captions (local Whisper, free).
+            tr = signals.WhisperTranscriber(s.whisper_model, cache_dir=os.environ.get("WHISPER_CACHE_DIR"))
+            end = a.end if a.end is not None else render.media.probe(src)["duration"]
+            cues = commentary.transcript_cues(tr.transcribe(src, start=in_s, duration=end - in_s), end - in_s)
         brand = render.channel_brand(s, a.channel) if a.channel else {}
     return render.compare_styles(src, in_s=in_s, out_s=out_s, cues=cues, styles_=a.styles.split(","),
                                  out_dir=a.out_dir or str(s.dir("work", "style-compare")), size=a.size,
@@ -450,7 +457,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--platform", default="shared", choices=["shared", "youtube", "instagram", "tiktok"])
     sp.add_argument("--layout", default="auto", choices=["auto", "crop", "blur"],
                     help="crop = follow the action in a 9:16 crop; blur = whole frame on a blurred fill")
-    sp.add_argument("--facecam", help="x,y,w,h of the facecam in the source (fractions), plus :pip or :split")
+    sp.add_argument("--facecam", help="auto (detect it), or x,y,w,h in fractions of the picture, plus :pip or :split")
+    sp.add_argument("--transcribe", action="store_true", help="captions from the clip's real speech (Whisper)")
     sp.add_argument("--out-dir")
     sp = add("check", cmd_check, "final policy and quality check, then queue for approval")
     sp.add_argument("--clips")

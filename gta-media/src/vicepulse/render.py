@@ -210,7 +210,7 @@ def edit_style(value: str | None = None) -> str | None:
 
 def compare_styles(src: str, *, in_s: float, out_s: float | None, cues: list[dict], styles_: list[str], out_dir: str,
                    size: str = "720x1280", encoder: str = "auto", platform: str = "shared", brand: dict | None = None,
-                   facecam: dict | None = None, layout: str = "auto") -> dict:
+                   facecam: str | dict | None = None, layout: str = "auto") -> dict:
     """The same highlight in several styles: one analysis, one render per style, quality checks, and a
     side-by-side preview video for comparing them."""
     from . import styles
@@ -221,12 +221,12 @@ def compare_styles(src: str, *, in_s: float, out_s: float | None, cues: list[dic
     enc = pick_encoder(encoder)
     folder = Path(out_dir)
     folder.mkdir(parents=True, exist_ok=True)
-    analysis = styles.analyse(src, info, in_s, out_s, cues)
+    analysis = styles.analyse(src, info, in_s, out_s, cues, facecam=facecam)
     results = []
     for name in [styles.style_name(x) for x in styles_]:
         res = styles.render_styled(src, info, in_s=in_s, out_s=out_s, cues=cues, style=name, platform=platform,
                                    out_path=folder / f"{name}.mp4", size=out_size, encoder=enc, preset="veryfast",
-                                   brand=brand, facecam=facecam, analysis=analysis, layout=layout)
+                                   brand=brand, facecam=analysis["facecam"], analysis=analysis, layout=layout)
         res["qc"] = styles.quality_check(res["path"], size=out_size, duration=res["plan"]["duration"])
         results.append(res)
     preview = folder / "side_by_side.mp4"

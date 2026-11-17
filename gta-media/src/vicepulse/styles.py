@@ -51,7 +51,7 @@ def style_name(value: str | None) -> str:
 @dataclass
 class Event:
     t: float            # seconds from the clip start
-    kind: str           # loud | cut | reaction
+    kind: str           # loud | cut | reaction | action
     strength: float     # 0..1
     detail: str
 
@@ -73,6 +73,19 @@ def loudness_events(path, in_s: float, dur: float, *, min_gap_s: float = 2.0) ->
             picked.append((t, v))
     events = [Event(round(max(0.0, t - 0.2), 2), "loud", round(max(0.05, min(1.0, (v - median - 4.0) / 14.0)), 2),
                     f"+{v - median:.0f} dB over the clip's normal level") for t, v in sorted(picked[:12])]
+    values = sorted(v for _, v in curve)
+    p90, p95, top = values[int(0.90 * (len(values) - 1))], values[int(0.95 * (len(values) - 1))], values[-1]
+    if p95 - median < 3.0 and not any(e.strength >= 0.3 for e in events) and top - p90 > 0.5:
+        # The sound was squashed flat (re-uploads, phone recordings, messaging apps): nothing is "much louder",
+        # so rank the clip's own loudest moments against its own range instead.
+        ranked: list[tuple[float, float]] = []
+        for t, v in sorted((p for p in curve if p[1] >= values[int(0.98 * (len(values) - 1))]), key=lambda p: -p[1]):
+            if all(abs(t - pt) >= 4.0 for pt, _ in ranked) and len(ranked) < 5:
+                ranked.append((t, v))
+        rel = [Event(round(max(0.0, t - 0.2), 2), "loud", round(0.35 + 0.45 * (v - p90) / (top - p90), 2),
+                     f"one of the loudest moments in this clip (+{v - median:.1f} dB; its sound is heavily compressed)")
+               for t, v in ranked]
+        events = sorted([e for e in events if all(abs(e.t - r.t) >= 2.0 for r in rel)] + rel, key=lambda e: e.t)
     return events, median   # strength < 0.15: a smaller moment (counts for the story, gets no effect)
 
 
@@ -95,33 +108,46 @@ def reaction_events(cues: list[dict]) -> list[Event]:
     return out
 
 
-def motion_track(path, in_s: float, dur: float, src_w: int, src_h: int, *, fps: int = 4, width: int = 96) -> dict:
-    """Where the action is, horizontally, over time: smoothed keyframes [(t, centre 0..1)] and overall spread."""
+def motion_track(path, in_s: float, dur: float, src_w: int, src_h: int, *, fps: int = 4, width: int = 96,
+                 crop: dict | None = None, mask: dict | None = None) -> dict:
+    """Where the action is, horizontally, over time: smoothed keyframes [(t, centre 0..1)] and overall spread.
+
+    crop: analyse only the picture inside the black bars. mask: ignore this area (the facecam), so the
+    crop follows the game, not the streamer moving their head."""
+    if crop:
+        src_w, src_h = crop["w"], crop["h"]
     h = max(2, int(round(width * src_h / max(src_w, 1) / 2)) * 2)
+    pre = f"crop={crop['w']}:{crop['h']}:{crop['x']}:{crop['y']}," if crop else ""
     raw = media.run_bytes(["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{in_s:.3f}", "-t", f"{dur:.3f}", "-i", str(path),
-                           "-an", "-vf", f"fps={fps},scale={width}:{h},format=gray", "-f", "rawvideo", "-"])
+                           "-an", "-vf", f"{pre}fps={fps},scale={width}:{h},format=gray", "-f", "rawvideo", "-"])
+    mx0 = mx1 = my0 = my1 = -1
+    if mask:
+        mx0, mx1 = int(mask["x"] * width), int((mask["x"] + mask["w"]) * width) + 1
+        my0, my1 = int(mask["y"] * h), int((mask["y"] + mask["h"]) * h) + 1
+    import numpy as np
+
     n = width * h
-    frames = [raw[i:i + n] for i in range(0, len(raw) - n + 1, n)]
-    cols_all = [0.0] * width
+    count = len(raw) // n
+    if count < 2:
+        return {"keys": [(0.0, 0.5)], "spread": 1.0, "centre": 0.5, "energy": []}
+    frames = np.frombuffer(raw[: count * n], np.uint8).reshape(count, h, width).astype(np.int16)
+    diff = np.abs(frames[1:] - frames[:-1])[:, ::2, :]            # every other row: same answer, half the work
+    if mask:
+        rows = np.arange(0, h, 2)
+        sel = (rows >= my0) & (rows < my1)
+        diff[:, sel, max(0, mx0):max(0, mx1)] = 0
+    colsum = diff.sum(axis=1).astype(np.float64)                 # (pairs, width)
+    colsum[colsum <= 3 * (h // 2)] = 0.0                          # ignore sensor/compression noise
+    secs = (np.arange(1, count) / fps).astype(int)
+    xs = np.arange(width)
     bins: dict[int, list[float]] = {}
-    for k in range(1, len(frames)):
-        a, b = frames[k - 1], frames[k]
-        cols = [0.0] * width
-        for y in range(0, h, 2):                      # every other row: same answer, half the work
-            row = y * width
-            for x in range(width):
-                cols[x] += abs(a[row + x] - b[row + x])
-        cols = [c if c > 3 * (h // 2) else 0.0 for c in cols]     # ignore sensor/compression noise
-        energy = sum(cols)
-        sec = int(k / fps)
-        acc = bins.setdefault(sec, [0.0, 0.0])
-        acc[0] += sum(x * c for x, c in enumerate(cols))
-        acc[1] += energy
-        for x in range(width):
-            cols_all[x] += cols[x]
+    for sec in np.unique(secs):
+        part = colsum[secs == sec]
+        bins[int(sec)] = [float((part * xs).sum()), float(part.sum())]
+    cols_all = colsum.sum(axis=0).tolist()
     total = sum(cols_all)
     if total <= 0:
-        return {"keys": [(0.0, 0.5)], "spread": 1.0, "centre": 0.5}
+        return {"keys": [(0.0, 0.5)], "spread": 1.0, "centre": 0.5, "energy": []}
     centre = sum(x * v for x, v in enumerate(cols_all)) / total
     spread = min(1.0, (sum(((x - centre) ** 2) * v for x, v in enumerate(cols_all)) / total) ** 0.5 / (width / 2))
     mean_e = total / max(1, len(bins))
@@ -139,18 +165,44 @@ def motion_track(path, in_s: float, dur: float, src_w: int, src_h: int, *, fps: 
         c = c if prev is None else max(prev - 0.15, min(prev + 0.15, c))
         out.append((round(min(t, dur), 2), round(c, 3)))
         prev = c
-    return {"keys": out, "spread": round(spread, 3), "centre": round(centre / (width - 1), 3)}
+    energy = [round(bins.get(sec, (0.0, 0.0))[1] / max(mean_e, 1e-9), 3) for sec in range(0, int(dur) + 1)]
+    return {"keys": out, "spread": round(spread, 3), "centre": round(centre / (width - 1), 3), "energy": energy}
 
 
-def analyse(path, info: dict, in_s: float, out_s: float, cues: list[dict] | None = None) -> dict:
+def action_events(motion: dict, *, min_ratio: float = 2.0, min_gap_s: float = 3.0) -> list[Event]:
+    """Bursts of on-screen movement (gunfire, crashes, explosions): seconds with far more movement than usual.
+    The facecam is masked out before this, so a streamer moving their head does not count."""
+    energy = motion.get("energy") or []
+    if len(energy) < 5:
+        return []
+    usual = statistics.median(energy) or 1e-9
+    peaks = sorted(((e / usual, sec) for sec, e in enumerate(energy)
+                    if e / usual >= min_ratio and e >= max(energy[max(0, sec - 1):sec + 2])), reverse=True)
+    out: list[Event] = []
+    for ratio, sec in peaks:
+        if all(abs(sec + 0.5 - e.t) >= min_gap_s for e in out) and len(out) < 6:
+            out.append(Event(round(sec + 0.5, 2), "action", round(min(0.7, 0.3 + 0.1 * (ratio - min_ratio)), 2),
+                             f"burst of on-screen action ({ratio:.1f}x the clip's usual movement)"))
+    return sorted(out, key=lambda e: e.t)
+
+
+def analyse(path, info: dict, in_s: float, out_s: float, cues: list[dict] | None = None, *,
+            facecam: str | dict | None = None, autocrop: bool = True) -> dict:
+    """facecam: None (none), 'auto' (detect it), or a dict {x, y, w, h, mode} in fractions of the picture."""
+    from . import facecam as fc
+
     dur = out_s - in_s
     t0 = time.monotonic()
+    active = fc.active_area(path, in_s, dur) if autocrop else None
+    cam = fc.detect_facecam(path, in_s, out_s, crop=active) if facecam == "auto" else facecam
     loud, median = loudness_events(path, in_s, dur) if info.get("has_audio") else ([], -120.0)
     cuts = cut_events(path, in_s, dur)
     react = reaction_events(cues or [])
-    motion = motion_track(path, in_s, dur, info["width"], info["height"])
-    return {"duration": round(dur, 3), "events": sorted(loud + cuts + react, key=lambda e: e.t),
+    motion = motion_track(path, in_s, dur, info["width"], info["height"], crop=active, mask=cam)
+    action = action_events(motion)
+    return {"duration": round(dur, 3), "events": sorted(loud + cuts + react + action, key=lambda e: e.t),
             "median_lufs": median, "motion": motion, "src_fps": info.get("fps") or 30.0,
+            "active": active, "facecam": cam, "facecam_detected": facecam == "auto" and cam is not None,
             "seconds": round(time.monotonic() - t0, 2)}
 
 
@@ -222,11 +274,18 @@ def pick_payoff(events: list[Event], dur: float) -> Event | None:
     """The moment the clip is about: the strongest loud spike, helped by a spoken reaction right after it."""
     best, best_score = None, 0.0
     for e in events:
-        if e.kind != "loud":
+        if e.kind == "loud":
+            bonus = 0.25 if any(r.kind == "reaction" and 0 <= r.t - e.t <= 2.5 for r in events) else 0.0
+            bonus += 0.15 if any(r.kind == "action" and abs(r.t - e.t) <= 1.5 for r in events) else 0.0
+            score = e.strength + bonus
+        elif e.kind == "action":
+            score = e.strength * 0.8
+        else:
             continue
-        bonus = 0.25 if any(r.kind == "reaction" and 0 <= r.t - e.t <= 2.5 for r in events) else 0.0
-        if e.strength + bonus > best_score:
-            best, best_score = e, e.strength + bonus
+        if e.t < 3.0:
+            score -= 0.15          # no room for any build-up before it
+        if score > best_score:
+            best, best_score = e, score
     if best is None:                                       # no loud moment: a spoken reaction can still carry it
         reacts = [e for e in events if e.kind == "reaction"]
         best = max(reacts, key=lambda e: e.strength, default=None)
@@ -266,10 +325,15 @@ def plan_edit(style: str, analysis: dict, cues: list[dict] | None = None, *, voi
     start = max(0.0, p - rules["context"])
     if (c := _cue_containing(cues, start)) is not None:
         start = max(0.0, c["start"] - 0.2)
-    # Natural end: let the payoff land, and keep anything that still happens after it (a second, smaller
-    # bang, a scene change, a spoken reaction), plus a short beat after the last of those.
-    after = [e.t for e in events if e.t > p + 0.5]
-    end = max(p + 4.0, (max(after) + 2.5) if after else 0.0)
+    # Natural end: let the payoff land, and keep what follows it while the action keeps going (each next loud
+    # moment, reaction or burst of action within 6 s of the last), plus a short beat after the last of those.
+    last = p
+    for e in sorted(events, key=lambda e: e.t):
+        if e.t > last and e.kind in ("loud", "reaction", "action"):
+            if e.t - last > 6.0:
+                break
+            last = e.t
+    end = max(p + 4.0, last + 2.5)
     # Someone is talking at (or within a second of) the end: let them finish the sentence.
     talking = [c["end"] for c in cues if c.get("kind") == "speech" and c["start"] < end + 1.0 and c["end"] > end]
     if talking:
@@ -286,7 +350,7 @@ def plan_edit(style: str, analysis: dict, cues: list[dict] | None = None, *, voi
     if start > 0:
         notes.append(f"starts {start:.1f}s in: {p - start:.1f}s of context before the payoff")
     if end < dur:
-        notes.append(f"ends {dur - end:.1f}s early: no loud moment, reaction or scene change after {end - 2.5:.1f}s")
+        notes.append(f"ends {dur - end:.1f}s early: the action after the payoff stops at {end - 2.5:.1f}s")
 
     segs: list[Segment] = []
     teaser_ok = rules["teaser"] > 0 and not voice and p - start >= 6.0
@@ -332,7 +396,7 @@ def _finish(plan: EditPlan, style: str, events: list[Event], payoff: Event | Non
     if style == "viral":
         used: list[float] = []
         for e in sorted(events, key=lambda e: -e.strength):
-            if e.kind not in ("loud", "reaction") or e.strength < 0.35:
+            if e.kind not in ("loud", "reaction", "action") or e.strength < 0.35:
                 continue
             t = plan.to_out(e.t)
             if t is None or any(abs(t - u) < 1.5 for u in used) or len(used) >= 5:
@@ -558,7 +622,7 @@ AUDIO_POLISH = {
 
 
 def build_graph(plan: EditPlan, info: dict, ass: Path, size: tuple[int, int], motion: dict, *,
-                facecam: dict | None = None, voice: bool = False) -> str:
+                facecam: dict | None = None, voice: bool = False, active: dict | None = None) -> str:
     """Input i is story segment i, already cut to that segment (see ``segment_inputs``); input n is the voice.
 
     Each segment is read from the file on its own. Splitting one input instead makes FFmpeg hold every
@@ -572,7 +636,8 @@ def build_graph(plan: EditPlan, info: dict, ass: Path, size: tuple[int, int], mo
     fade_col = "white" if plan.transition == "white" else "black"
     for i, s in enumerate(segs):
         seg_len = s.end - s.start
-        v = f"[{i}:v]trim=duration={_n(seg_len)},setpts=(PTS-STARTPTS)/{_n(s.speed)}"
+        pre = f"crop={active['w']}:{active['h']}:{active['x']}:{active['y']}," if active else ""
+        v = f"[{i}:v]{pre}trim=duration={_n(seg_len)},setpts=(PTS-STARTPTS)/{_n(s.speed)}"
         a = (f"[{i}:a]atrim=duration={_n(seg_len)},asetpts=PTS-STARTPTS" if has_audio
              else f"anullsrc=r=48000:cl=stereo,atrim=duration={_n(seg_len)}")
         if s.speed != 1.0:
@@ -589,7 +654,7 @@ def build_graph(plan: EditPlan, info: dict, ass: Path, size: tuple[int, int], mo
     g.append("".join(f"[v{i}][a{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=1[cv][ca]")
 
     # Framing on the edited timeline.
-    sw, sh = info["width"], info["height"]
+    sw, sh = (active["w"], active["h"]) if active else (info["width"], info["height"])
     keys = output_keys(plan, [tuple(k) for k in motion["keys"]])
     cam = facecam or None
     mode = (cam or {}).get("mode", "pip")
@@ -693,14 +758,21 @@ def render_styled(src_path: str, info: dict, *, in_s: float, out_s: float, cues:
                   plan: EditPlan | None = None) -> dict:
     """Render one clip in one style. Pass ``analysis`` to reuse it across styles and platforms."""
     t0 = time.monotonic()
-    analysis = analysis or analyse(src_path, info, in_s, out_s, cues)
+    analysis = analysis or analyse(src_path, info, in_s, out_s, cues, facecam=facecam)
     plan = plan or plan_edit(style, analysis, cues, voice=voice is not None, layout=layout)
+    facecam = analysis.get("facecam") if facecam in (None, "auto") else facecam
+    if facecam and facecam.get("mode", "auto") == "auto":
+        # The reaction is the show in Funny/Viral: camera on top, big. The others keep the game in front.
+        facecam = {**facecam, "mode": "split" if plan.style == "viral" else "pip"}
+    active = analysis.get("active")
+    view = {**info, "width": active["w"], "height": active["h"]} if active else info
     out_path.parent.mkdir(parents=True, exist_ok=True)
     ass = out_path.with_suffix(".ass")
     ass.write_text(build_styled_ass(retime_cues(cues, plan), plan, platform, brand,
-                                    top_margin=title_margin(facecam, info)), encoding="utf-8")
+                                    top_margin=title_margin(facecam, view)), encoding="utf-8")
     args = ["ffmpeg", "-v", "error", "-y", *segment_inputs(plan, src_path, in_s)]
-    graph = build_graph(plan, info, ass, size, analysis["motion"], facecam=facecam, voice=voice is not None)
+    graph = build_graph(plan, info, ass, size, analysis["motion"], facecam=facecam, voice=voice is not None,
+                        active=active)
     if voice:
         args += ["-i", str(voice)]
     script = out_path.with_suffix(".graph.txt")
@@ -715,7 +787,7 @@ def render_styled(src_path: str, info: dict, *, in_s: float, out_s: float, cues:
             raise
         used = "libx264"
         media.run(base + _video_codec_args("libx264", preset) + tail)
-    return {"path": str(out_path), "style": plan.style, "encoder": used, "plan": plan.as_dict(),
+    return {"path": str(out_path), "style": plan.style, "encoder": used, "plan": plan.as_dict(), "facecam": facecam,
             "render_s": round(time.monotonic() - t0, 2)}
 
 

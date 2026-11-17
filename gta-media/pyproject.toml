@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 whisper = ["faster-whisper>=1.0"]
+facecam = ["opencv-python-headless>=4.10,<5"]
 test = ["pytest>=8"]
 
 [project.scripts]
