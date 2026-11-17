@@ -82,7 +82,8 @@ class ReviewApp:
         s = self.settings
         tabs = "".join(f'<a href="{href}" class="{"on" if key == tab else ""}">{label}</a>'
                        for key, href, label in (("pending", "/", "Waiting for review"), ("done", "/done", "Reviewed"),
-                                                ("creators", "/creators", "Creators"), ("accounts", "/accounts", "Accounts")))
+                                                ("live", "/live", "Live"), ("creators", "/creators", "Creators"),
+                                                ("accounts", "/accounts", "Accounts")))
         safe = (f'AI: {e(s.llm_mode)} &middot; live publishing: {"ON" if s.allow_live_publish else "off"}'
                 f' &middot; approval required: {"yes" if s.require_approval else "no"}')
         note = f'<div class="msg{" err" if err else ""}">{e(msg)}</div>' if msg else ""
@@ -201,6 +202,90 @@ class ReviewApp:
                    'which channel to use.</p>')
         out.append(self.instagram_section(st, csrf))
         out.append(self.tiktok_section(st, csrf))
+        out.append(self.twitch_section(csrf))
+        return "".join(out)
+
+    @property
+    def twitch_redirect(self) -> str:
+        return f"{self.public_url}/oauth/twitch/callback"
+
+    def twitch_section(self, csrf: str) -> str:
+        info = accounts.load(self.settings.data_dir, "twitch_user")
+        cid, _ = accounts.twitch_app()
+        out = ['<h3>Twitch (live clips)</h3><p class=meta>VicePulse\'s own Twitch account makes clips of live streams '
+               'through Twitch\'s official API. A streamer allows it by adding this account as an <b>editor</b> of '
+               'their channel. In the Twitch developer console, add this OAuth Redirect URL to the VicePulse app: '
+               f'<code>{e(self.twitch_redirect)}</code></p>']
+        if info.get("access_token"):
+            out.append(f'<p>connected: <b>{e(info.get("login"))}</b> &#10003; (permissions: {e(", ".join(info.get("scope") or []))})</p>')
+        if cid:
+            out.append(f'<form method=post action="/accounts/twitch-start">{csrf}<button class='
+                       f'{"plain" if info.get("access_token") else "approve"}>'
+                       f'{"Reconnect" if info.get("access_token") else "Connect VicePulse Twitch account"}</button></form>')
+        else:
+            out.append('<p class=meta>Set TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET in .env first.</p>')
+        return "".join(out)
+
+    def twitch_start(self) -> str:
+        state = secrets.token_urlsafe(24)
+        self.oauth_states[state] = "twitch:vicepulse"
+        return accounts.twitch_auth_url(self.twitch_redirect, state)
+
+    def twitch_callback(self, q: dict, session=None) -> str:
+        if q.get("error"):
+            raise ValueError(f"Twitch sign-in was cancelled ({q.get('error_description') or q['error']})")
+        if self.oauth_states.pop(q.get("state", ""), "") != "twitch:vicepulse":
+            raise ValueError("this sign-in link expired; press Connect again")
+        info = accounts.twitch_connect(self.settings.data_dir, q.get("code", ""), self.twitch_redirect, session=session)
+        return f"Twitch connected: {info['login']} ({', '.join(info['scope'])}). Nothing was posted."
+
+    def live_page(self, conn) -> str:
+        from . import live
+
+        st = live.status(conn)
+        label = {"spike": "SPIKE DETECTED", "capturing": "CAPTURING", "downloading": "CAPTURING",
+                 "editing": "EDITING", "ready": "READY FOR REVIEW", "failed": "FAILED", "skipped": "SKIPPED",
+                 "merged": "MERGED"}
+        colour = {"ready": "var(--ok)", "failed": "var(--no)", "skipped": "var(--muted)"}
+        out = ['<script>setTimeout(function(){location.reload()},5000)</script>',
+               '<p class=meta>Updates every 5 seconds. Clips are only taken while a stream is live. Finished clips go to '
+               '<a href="/">Waiting for review</a>; nothing is published from here.</p><h3>Streams</h3>']
+        if not st["sessions"]:
+            out.append('<div class=empty>No streams watched yet. Start one with <code>vicepulse live-watch --twitch '
+                       '&lt;login&gt; --channel br --creator-id N</code>.</div>')
+        else:
+            out.append('<table><tr><th>Streamer</th><th>Status</th><th>Chat now</th><th>Normal</th><th>Spike score</th>'
+                       '<th>Since</th></tr>')
+            for s in st["sessions"]:
+                badge = "LIVE" if s["status"] == "live" else s["status"].upper()
+                out.append(f'<tr><td><b>{e(s["display_name"] or s["login"])}</b> <span class=tag>{e(s["channel_key"]).upper()}</span>'
+                           f'<div class=meta>{e(s["stream_title"] or "")}</div></td>'
+                           f'<td><span class=tag style="{"background:var(--no);color:#fff" if badge == "LIVE" else ""}">{badge}</span></td>'
+                           f'<td>{e(s["chat_rate"] if s["chat_rate"] is not None else "-")} msg/s</td>'
+                           f'<td>{e(s["chat_baseline"] if s["chat_baseline"] is not None else "-")} msg/s</td>'
+                           f'<td>{e(s["last_score"] if s["last_score"] is not None else "-")}</td>'
+                           f'<td class=meta>{e((s["started_at"] or s["created_at"]).strftime("%d/%m %H:%M"))}</td></tr>')
+            out.append('</table>')
+        out.append('<h3>Moments</h3>')
+        if not st["moments"]:
+            out.append('<div class=empty>No moments yet.</div>')
+        else:
+            out.append('<table><tr><th>#</th><th>Streamer</th><th>Detected</th><th>Score</th><th>Status</th>'
+                       '<th>Time to clip</th><th></th></tr>')
+            for m in st["moments"]:
+                sig = m["signals"] or {}
+                score = f'chat {sig.get("chat", {}).get("score", m["score"])}'
+                if "audio_excitement" in sig:
+                    score += f' &middot; audio {sig["audio_excitement"]} &middot; total {sig.get("combined")}'
+                if sig.get("merged"):
+                    score += f' &middot; +{sig["merged"]} merged'
+                link = "".join(f'<a class=tag href="/media/{c}/youtube" target=_blank>clip {c}</a>' for c in (m["clip_ids"] or []))
+                out.append(f'<tr><td>{m["id"]}</td><td>{e(m["login"])} <span class=tag>{e(m["channel_key"]).upper()}</span></td>'
+                           f'<td class=meta>{e(m["detected_at"].strftime("%H:%M:%S"))}</td><td class=meta>{score}</td>'
+                           f'<td><b style="color:{colour.get(m["status"], "var(--accent)")}">{label.get(m["status"], m["status"])}</b>'
+                           f'<div class=meta>{e(m["status_reason"] or "")}</div></td>'
+                           f'<td>{e(str(round(m["latency_s"])) + " s" if m["latency_s"] else "")}</td><td>{link}</td></tr>')
+            out.append('</table>')
         return "".join(out)
 
     def tiktok_section(self, st: dict, csrf: str) -> str:
@@ -605,6 +690,13 @@ def make_handler(app: ReviewApp):
                     return self._redirect(f"/accounts?msg={quote(done)}")
                 except (ValueError, KeyError, OSError) as ex:
                     return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
+            if url.path == "/oauth/twitch/callback":
+                from urllib.parse import quote
+                try:
+                    done = app.twitch_callback({k: v[0] for k, v in q.items()}, session=getattr(app, "http", None))
+                    return self._redirect(f"/accounts?msg={quote(done)}")
+                except (ValueError, KeyError, OSError) as ex:
+                    return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
             if url.path == "/oauth/tiktok/callback":     # only reached if the redirect address opens this page
                 from urllib.parse import quote
                 try:
@@ -640,6 +732,8 @@ def make_handler(app: ReviewApp):
                 if url.path in pages:
                     title, tab, statuses, act = pages[url.path]
                     body = app.page(title, app.clip_cards(conn, statuses, act), tab, msg, err)
+                elif url.path == "/live":
+                    body = app.page("Live", app.live_page(conn), "live", msg, err)
                 elif url.path == "/creators":
                     body = app.page("Creators", app.creators_page(conn), "creators", msg, err)
                 elif url.path == "/accounts":
@@ -732,6 +826,11 @@ def make_handler(app: ReviewApp):
                                                session=getattr(app, "http", None))
                     return self._redirect(f"/accounts?msg={quote(done)}")
                 except (ValueError, KeyError, OSError) as ex:
+                    return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
+            if path == "/accounts/twitch-start":
+                try:
+                    return self._redirect(app.twitch_start())
+                except ValueError as ex:
                     return self._redirect(f"/accounts?err=1&msg={quote(str(ex))}")
             if path == "/tiktok/post":
                 clip = form.get("clip", "")

@@ -125,6 +125,35 @@ def cmd_accounts_check(a, s, conn):
     return accounts.verify(s)
 
 
+def cmd_live_watch(a, s, conn):
+    """Watch one Twitch broadcaster and clip spikes while they are live (runs until the stream ends)."""
+    from . import live
+
+    tw = live.TwitchLive(s)
+    row = live.start_session(conn, s, tw, a.twitch, a.channel, creator_id=a.creator_id, own=a.own)
+    det = live.SpikeDetector(threshold=a.threshold)
+    runner = live.LiveRunner(s, row, tw=tw, detector=det, capture_delay_s=a.delay)
+    print(json.dumps({"watching": row["login"], "session": row["id"], "channel": a.channel,
+                      "live_publishing": "on" if s.allow_live_publish else "off"}), flush=True)
+    return runner.run(until_end=not a.keep_waiting, max_hours=a.max_hours)
+
+
+def cmd_telegram_setup(a, s, conn):
+    """Find your Telegram chat id (send any message to your bot first); with --test, send a test message."""
+    from . import notify
+
+    if a.test:
+        return {"sent": notify.send("VicePulse test: notifications work.")}
+    return {"chats": notify.find_chat_ids(),
+            "next": "put the chat_id in .env as TELEGRAM_CHAT_ID, restart, then run telegram-setup --test"}
+
+
+def cmd_live_status(a, s, conn):
+    from . import live
+
+    return live.status(conn)
+
+
 def cmd_autoclip(a, s, conn):
     if not 15 <= a.clip_seconds <= 60:
         raise ValueError("--clip-seconds must be between 15 and 60")
@@ -311,6 +340,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--creator", default="", help="permission: the creator's name")
     sp.add_argument("--channel", default="en", choices=["en", "br"])
     sp.add_argument("--clip-seconds", type=float, default=45.0)
+    sp = add("live-watch", cmd_live_watch, "watch a Twitch streamer and clip chat spikes while live (official API)")
+    sp.add_argument("--twitch", required=True, help="the Twitch login (twitch.tv/<login>)")
+    sp.add_argument("--channel", required=True, choices=["en", "br"])
+    who = sp.add_mutually_exclusive_group(required=True)
+    who.add_argument("--creator-id", type=int, help="the authorized creator (Creators tab)")
+    who.add_argument("--own", action="store_true", help="your own stream")
+    sp.add_argument("--threshold", type=float, default=0.55, help="spike score needed (0-1)")
+    sp.add_argument("--delay", type=float, default=20.0, help="seconds after a spike before the clip is taken")
+    sp.add_argument("--keep-waiting", action="store_true", help="keep watching after the stream ends")
+    sp.add_argument("--max-hours", type=float, default=16.0)
+    add("live-status", cmd_live_status, "live sessions and detected moments")
+    sp = add("telegram-setup", cmd_telegram_setup, "find your Telegram chat id for clip notifications")
+    sp.add_argument("--test", action="store_true", help="send a test message")
     sp = add("autoclip", cmd_autoclip, "hands-free: fetch legitimately usable footage, clip, subtitle, render, save MP4")
     sp.add_argument("--source", default="all", choices=["all", "commons", "own"])
     sp.add_argument("--channel", help="comma list of channels, default from config (en)")

@@ -609,6 +609,75 @@ def tiktok_credentials(data_dir: Path, channel_key: str, session: requests.Sessi
     return info["access_token"]
 
 
+# ---------------------------------------------------------------- Twitch (VicePulse's own account, for live clips)
+
+TW_AUTH_URL = "https://id.twitch.tv/oauth2/authorize"
+TW_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
+TW_VALIDATE_URL = "https://id.twitch.tv/oauth2/validate"
+# clips:edit = make a clip of a live stream; editor:manage:clips = download clips of channels where we are editor.
+TWITCH_SCOPES = ["clips:edit", "editor:manage:clips"]
+
+
+def twitch_app() -> tuple[str, str]:
+    return os.environ.get("TWITCH_CLIENT_ID", ""), os.environ.get("TWITCH_CLIENT_SECRET", "")
+
+
+def twitch_auth_url(redirect_uri: str, state: str) -> str:
+    cid, _ = twitch_app()
+    if not cid:
+        raise ValueError("TWITCH_CLIENT_ID is not set in .env")
+    return TW_AUTH_URL + "?" + urlencode({"client_id": cid, "redirect_uri": redirect_uri, "response_type": "code",
+                                          "scope": " ".join(TWITCH_SCOPES), "state": state, "force_verify": "true"})
+
+
+def _tw_token(http, data: dict, what: str) -> dict:
+    try:
+        r = http.post(TW_TOKEN_URL, data=data, timeout=30)
+    except requests.RequestException as ex:
+        raise ValueError(f"could not reach Twitch ({type(ex).__name__}); try again") from None
+    if r.status_code != 200:
+        try:
+            msg = r.json().get("message")
+        except ValueError:
+            msg = r.text[:200]
+        raise ValueError(f"Twitch refused the {what} ({r.status_code}): {msg}")
+    return r.json()
+
+
+def twitch_connect(data_dir: Path, code: str, redirect_uri: str, session: requests.Session | None = None) -> dict:
+    http = session or requests.Session()
+    cid, sec = twitch_app()
+    tok = _tw_token(http, {"client_id": cid, "client_secret": sec, "code": code.strip(),
+                           "grant_type": "authorization_code", "redirect_uri": redirect_uri}, "sign-in code")
+    scopes = tok.get("scope") or []
+    missing = [s for s in TWITCH_SCOPES if s not in scopes]
+    if missing:
+        raise ValueError(f"Twitch did not grant {', '.join(missing)}; connect again and allow everything")
+    v = http.get(TW_VALIDATE_URL, headers={"Authorization": f"OAuth {tok['access_token']}"}, timeout=30)
+    who = v.json() if v.status_code == 200 else {}
+    now = int(time.time())
+    save(data_dir, "twitch_user", {"access_token": tok["access_token"], "refresh_token": tok.get("refresh_token", ""),
+                                   "expires_at": now + int(tok.get("expires_in") or 0), "scope": scopes,
+                                   "user_id": who.get("user_id"), "login": who.get("login"), "connected_at": now})
+    return {"login": who.get("login"), "user_id": who.get("user_id"), "scope": scopes}
+
+
+def twitch_user_token(data_dir: Path, session: requests.Session | None = None) -> tuple[str, str]:
+    """(user_id, access token) of VicePulse's Twitch account, renewed when it is close to expiring."""
+    info = load(data_dir, "twitch_user")
+    if not info.get("access_token"):
+        raise ValueError("VicePulse's Twitch account is not connected (Accounts page > Twitch)")
+    if info.get("expires_at", 0) - time.time() < 300:
+        cid, sec = twitch_app()
+        new = _tw_token(session or requests.Session(), {"client_id": cid, "client_secret": sec,
+                                                        "grant_type": "refresh_token",
+                                                        "refresh_token": info.get("refresh_token", "")}, "login renewal")
+        info.update(access_token=new["access_token"], refresh_token=new.get("refresh_token") or info["refresh_token"],
+                    expires_at=int(time.time()) + int(new.get("expires_in") or 0))
+        save(data_dir, "twitch_user", info)
+    return info.get("user_id") or "", info["access_token"]
+
+
 def verify(settings: Settings, session: requests.Session | None = None) -> dict:
     """Ask Google and Meta which account each stored login opens, and compare with the channel config.
 
