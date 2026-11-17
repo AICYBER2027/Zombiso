@@ -136,6 +136,39 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
 
+  # Direct-feed receiver: creators' second OBS output -> short rolling buffer for live clipping.
+  # RTMP is bound to this PC only (127.0.0.1). Letting creators reach it from the internet needs a deliberate
+  # choice (router port or a relay) and the owner's approval; nothing here opens it.
+  mediamtx:
+    image: bluenviron/mediamtx:1.9.3
+    restart: unless-stopped
+    command: ["/mediamtx.yml"]
+    volumes:
+      - ./docker/mediamtx.yml:/mediamtx.yml:ro
+      - mediadata:/data
+    ports:
+      - "127.0.0.1:1935:1935"
+    depends_on: [vicepulse]
+
+  # The live watcher: every enabled direct feed (and optional Twitch streamers) in one process, sharing one
+  # editing queue. Not started by default:  docker compose --profile live up -d live
+  live:
+    image: vicepulse-worker:local
+    restart: unless-stopped
+    profiles: ["live"]
+    command: ["vicepulse", "live-run", "--feeds", "all"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://vicepulse:${POSTGRES_PASSWORD}@postgres:5432/vicepulse
+      VICEPULSE_HOME: /app
+      VICEPULSE_DATA_DIR: /data
+      VICEPULSE_VOICE_DIR: /data/voice
+      VICEPULSE_CHANNELS_FILE: /app/config/channels.json
+      VICEPULSE_GAMES_FILE: /app/config/games.json
+    volumes:
+      - mediadata:/data
+    depends_on: [mediamtx]
+
 volumes:
   pgdata:
   redisdata:

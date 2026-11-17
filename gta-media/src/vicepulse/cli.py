@@ -130,7 +130,8 @@ def cmd_live_watch(a, s, conn):
     from . import live
 
     tw = live.TwitchLive(s)
-    row = live.start_session(conn, s, tw, a.twitch, a.channel, creator_id=a.creator_id, own=a.own)
+    row = live.start_session(conn, s, tw, a.twitch, a.channel, creator_id=a.creator_id, own=a.own,
+                             also_channels=_also(a.also_channel))
     det = live.SpikeDetector(threshold=a.threshold)
     runner = live.LiveRunner(s, row, tw=tw, detector=det, chat_latency_s=a.chat_latency)
     print(json.dumps({"watching": row["login"], "session": row["id"], "channel": a.channel,
@@ -152,6 +153,75 @@ def cmd_live_status(a, s, conn):
     from . import live
 
     return live.status(conn)
+
+
+def _also(value: str | None) -> list[str]:
+    return [c.strip() for c in (value or "").split(",") if c.strip()]
+
+
+def cmd_feed_add(a, s, conn):
+    """Register a direct feed; prints the OBS server + stream key once (only a hash is stored)."""
+    from . import feeds
+
+    row = feeds.add_feed(conn, s, a.name, a.display_name or a.name, a.channel, creator_id=a.creator_id, own=a.own,
+                         also_channels=_also(a.also_channel))
+    return {"feed": row["slug"], "channels": row["channels"], "obs": row["obs"],
+            "keep_private": "the stream key works like a password; it is not shown again (feed-key makes a new one)"}
+
+
+def cmd_feed_key(a, s, conn):
+    from . import feeds
+
+    return {"feed": a.name, "obs": feeds.new_key(conn, a.name, s)}
+
+
+def cmd_feed_list(a, s, conn):
+    rows = conn.execute("""SELECT slug, display_name, channel_key, channels, enabled, last_auth_at, last_auth_ok, created_at
+                           FROM live_feeds ORDER BY id""").fetchall()
+    return {"feeds": rows}
+
+
+def cmd_live_run(a, s, conn):
+    """Watch every listed direct feed (and Twitch streamers) in one process, with one shared editing queue."""
+    import threading
+
+    from . import feeds, live
+
+    runners = []
+    slugs = [r["slug"] for r in conn.execute("SELECT slug FROM live_feeds WHERE enabled ORDER BY id").fetchall()] \
+        if a.feeds == "all" else _also(a.feeds)
+    rx = feeds.Receiver(api=a.receiver_api, rtsp=a.receiver_rtsp, rec_dir=s.data_dir / "feeds" / "rec")
+    for slug in slugs:
+        row = feeds.start_session(conn, s, slug)
+        runners.append(feeds.FeedRunner(s, row, receiver=rx, grace_s=a.grace,
+                                        detector=feeds.AudioSpikeDetector(threshold=a.threshold)))
+    for spec in a.twitch or []:                        # LOGIN:CHANNEL[:CREATOR_ID|own][:ALSO]
+        parts = spec.split(":")
+        if len(parts) < 3:
+            raise ValueError("--twitch LOGIN:CHANNEL:CREATOR_ID (or LOGIN:CHANNEL:own), optionally :br for a 2nd channel")
+        login, ch, who = parts[:3]
+        tw = live.TwitchLive(s)
+        row = live.start_session(conn, s, tw, login, ch, creator_id=None if who == "own" else int(who),
+                                 own=who == "own", also_channels=_also(parts[3] if len(parts) > 3 else None))
+        runners.append(live.LiveRunner(s, row, tw=tw))
+    if not runners:
+        raise ValueError("nothing to watch: add a feed (feed-add) or pass --twitch")
+    print(json.dumps({"watching": [r.s["login"] for r in runners], "editing": "one shared queue",
+                      "live_publishing": "on" if s.allow_live_publish else "off"}), flush=True)
+    results: list = []
+    threads = [threading.Thread(target=lambda r=r: results.append(r.run(until_end=False, max_hours=a.max_hours)),
+                                daemon=True) for r in runners]
+    for t in threads:
+        t.start()
+    try:
+        for t in threads:
+            t.join()
+    except KeyboardInterrupt:
+        for r in runners:
+            r.stop.set()
+        for t in threads:
+            t.join(timeout=60)
+    return {"results": results}
 
 
 def cmd_autoclip(a, s, conn):
@@ -351,7 +421,27 @@ def build_parser() -> argparse.ArgumentParser:
                     help="seconds between the moment on stream and the chat reacting (shifts the 20 s/60 s window)")
     sp.add_argument("--keep-waiting", action="store_true", help="keep watching after the stream ends")
     sp.add_argument("--max-hours", type=float, default=16.0)
+    sp.add_argument("--also-channel", help="extra channels that also get a version, e.g. br")
     add("live-status", cmd_live_status, "live sessions and detected moments")
+    sp = add("feed-add", cmd_feed_add, "register a creator's direct live feed (second OBS output); prints the key once")
+    sp.add_argument("--name", required=True, help="short feed name, e.g. burgao")
+    sp.add_argument("--display-name")
+    sp.add_argument("--channel", required=True, choices=["en", "br"])
+    sp.add_argument("--also-channel", help="extra channels that also get a version, e.g. br")
+    who = sp.add_mutually_exclusive_group(required=True)
+    who.add_argument("--creator-id", type=int, help="the authorized creator (Creators tab)")
+    who.add_argument("--own", action="store_true", help="your own stream or test footage")
+    sp = add("feed-key", cmd_feed_key, "replace a feed's stream key")
+    sp.add_argument("--name", required=True)
+    add("feed-list", cmd_feed_list, "list direct feeds (no keys)")
+    sp = add("live-run", cmd_live_run, "watch direct feeds and Twitch streamers together, one shared editing queue")
+    sp.add_argument("--feeds", default="all", help="'all' enabled feeds, a comma list, or 'none'")
+    sp.add_argument("--twitch", action="append", help="LOGIN:CHANNEL:CREATOR_ID[:ALSO], repeatable")
+    sp.add_argument("--threshold", type=float, default=0.55, help="audio spike score needed (0-1)")
+    sp.add_argument("--grace", type=float, default=30.0, help="seconds a feed may drop before the session ends")
+    sp.add_argument("--receiver-api", default="http://mediamtx:9997")
+    sp.add_argument("--receiver-rtsp", default="rtsp://mediamtx:8554")
+    sp.add_argument("--max-hours", type=float, default=24.0)
     sp = add("telegram-setup", cmd_telegram_setup, "find your Telegram chat id for clip notifications")
     sp.add_argument("--test", action="store_true", help="send a test message")
     sp = add("autoclip", cmd_autoclip, "hands-free: fetch legitimately usable footage, clip, subtitle, render, save MP4")

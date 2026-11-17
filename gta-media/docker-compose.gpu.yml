@@ -1,0 +1,21 @@
+# Optional: let the VicePulse containers use the NVIDIA GPU (NVENC video encoding).
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d vicepulse review
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile live up -d live
+# Checked on this PC (GTX 1050, Docker Desktop + WSL2): h264_nvenc works inside the worker image.
+# Without this file nothing changes: live renders fall back to the CPU encoder automatically.
+
+x-gpu: &gpu
+  environment:
+    NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  vicepulse: *gpu
+  review: *gpu
+  live: *gpu

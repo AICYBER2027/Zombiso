@@ -103,11 +103,13 @@ class WhisperTranscriber:
         self._model = WhisperModel(model, device="cpu", compute_type="int8", download_root=cache_dir)
         self.language: str | None = None
 
-    def transcribe(self, path: str | Path, start: float | None = None, duration: float | None = None) -> list[Segment]:
+    def transcribe(self, path: str | Path, start: float | None = None, duration: float | None = None,
+                   task: str = "transcribe") -> list[Segment]:
+        """task="translate": Whisper's own speech-to-English translation (e.g. Portuguese speech -> English cues)."""
         audio = decode_audio_16k(path, start, duration)
         if audio.size < 1600:                       # under 0.1 s of audio, or no audio track
             return []
-        segments, info = self._model.transcribe(audio, word_timestamps=True, vad_filter=True)
+        segments, info = self._model.transcribe(audio, word_timestamps=True, vad_filter=True, task=task)
         self.language = info.language
         out = []
         for seg in segments:

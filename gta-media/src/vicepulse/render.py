@@ -2,11 +2,17 @@
 
 One template, driven by the clip's edit data. Each platform gets its own file so caption
 safe areas can differ.
+
+Faster mode (used for live clips): a smaller size such as 720x1280, the GPU encoder (NVENC) when the
+container can reach it, and ``reuse=True``, which encodes once with the strictest caption safe area and
+reuses that file for every platform instead of encoding three times.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 from PIL import Image, ImageChops
@@ -28,7 +34,8 @@ def _ass_time(t: float) -> str:
 
 
 def build_ass(cues: list[dict], platform: str) -> str:
-    margin = CAPTION_MARGIN_V[platform]
+    # "shared": one file for every platform, so it keeps clear of the tallest app overlay.
+    margin = max(CAPTION_MARGIN_V.values()) if platform == "shared" else CAPTION_MARGIN_V[platform]
     head = (
         "[Script Info]\nScriptType: v4.00+\n"
         f"PlayResX: {OUT_W}\nPlayResY: {OUT_H}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n"
@@ -79,27 +86,84 @@ def _esc(path: Path) -> str:
     return str(path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'").replace(",", "\\,")
 
 
-def video_filter(src_w: int, src_h: int, ass: Path, *, layout: str, centre: float = 0.5) -> str:
+def video_filter(src_w: int, src_h: int, ass: Path, *, layout: str, centre: float = 0.5,
+                 size: tuple[int, int] = (OUT_W, OUT_H)) -> str:
+    # Captions are laid out on a 1080x1920 canvas (PlayRes); libass scales them to the real output size.
+    w, h = size
+    blur = max(6, round(20 * h / OUT_H))
     if layout == "crop":
-        scaled_w = src_w * OUT_H / src_h
-        x = max(0, min(int(scaled_w * centre - OUT_W / 2), int(scaled_w - OUT_W)))
-        base = f"[0:v]scale=-2:{OUT_H},crop={OUT_W}:{OUT_H}:{x}:0[base]"
-    else:  # blurred fill behind the full frame
+        scaled_w = src_w * h / src_h
+        x = max(0, min(int(scaled_w * centre - w / 2), int(scaled_w - w)))
+        base = f"[0:v]scale=-2:{h},crop={w}:{h}:{x}:0[base]"
+    else:  # blurred fill behind the full frame (blurred at quarter size: same look, far less CPU)
         base = (f"[0:v]split=2[bgsrc][fgsrc];"
-                f"[bgsrc]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=increase,crop={OUT_W}:{OUT_H},boxblur=20:5[bg];"
-                f"[fgsrc]scale={OUT_W}:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[base]")
+                f"[bgsrc]scale={w // 4}:{h // 4}:force_original_aspect_ratio=increase,crop={w // 4}:{h // 4},"
+                f"boxblur={max(2, blur // 4)}:3,scale={w}:{h}[bg];"
+                f"[fgsrc]scale={w}:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[base]")
     return f"{base};[base]fps={FPS},setsar=1,ass={_esc(ass)},format=yuv420p[v]"
+
+
+def _same_file(src: Path, dest: Path) -> None:
+    """dest becomes the same video as src: a hard link (no extra disk) or, if that is not possible, a copy."""
+    dest.unlink(missing_ok=True)
+    try:
+        os.link(src, dest)
+    except OSError:
+        shutil.copyfile(src, dest)
+
+
+def render_size(value: str | None = None) -> tuple[int, int]:
+    """'720x1280' -> (720, 1280). Default from VICEPULSE_RENDER_SIZE, else 1080x1920."""
+    value = value or os.environ.get("VICEPULSE_RENDER_SIZE") or f"{OUT_W}x{OUT_H}"
+    w, h = (int(x) for x in value.lower().split("x"))
+    if w % 2 or h % 2 or not (360 <= w <= 2160 and w * 16 == h * 9):
+        raise ValueError(f"render size must be an even 9:16 size such as 720x1280, got {value}")
+    return w, h
+
+
+_NVENC_OK: bool | None = None
+
+
+def nvenc_available() -> bool:
+    """True when this container can use the NVIDIA hardware encoder (checked once with a 1 s test encode)."""
+    global _NVENC_OK
+    if _NVENC_OK is None:
+        try:
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=256x256:rate=30", "-t", "1",
+                            "-c:v", "h264_nvenc", "-f", "null", "-"], check=True, capture_output=True, timeout=30)
+            _NVENC_OK = True
+        except (subprocess.SubprocessError, OSError):
+            _NVENC_OK = False
+    return _NVENC_OK
+
+
+def pick_encoder(choice: str | None = None) -> str:
+    """libx264 | nvenc | auto (nvenc when available, else libx264). Default VICEPULSE_VIDEO_ENCODER or libx264."""
+    choice = (choice or os.environ.get("VICEPULSE_VIDEO_ENCODER") or "libx264").lower()
+    if choice == "auto":
+        return "nvenc" if nvenc_available() else "libx264"
+    if choice not in ("libx264", "nvenc"):
+        raise ValueError(f"unknown video encoder {choice!r} (libx264, nvenc or auto)")
+    return choice
+
+
+def _video_codec_args(encoder: str, preset: str) -> list[str]:
+    if encoder == "nvenc":
+        return ["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", "23", "-b:v", "0",
+                "-profile:v", "high"]
+    return ["-c:v", "libx264", "-preset", preset, "-crf", "20", "-profile:v", "high"]
 
 
 def render_clip_platform(src_path: str, src_info: dict, *, in_s: float, out_s: float, cues: list[dict],
                          platform: str, out_path: Path, voice: Path | None, layout: str, centre: float,
-                         preset: str = "medium") -> Path:
+                         preset: str = "medium", size: tuple[int, int] = (OUT_W, OUT_H),
+                         encoder: str = "libx264") -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     ass = out_path.with_suffix(".ass")
     ass.write_text(build_ass(cues, platform), encoding="utf-8")
     dur = out_s - in_s
     args = ["ffmpeg", "-v", "error", "-y", "-ss", f"{in_s:.3f}", "-t", f"{dur:.3f}", "-i", src_path]
-    graph = [video_filter(src_info["width"], src_info["height"], ass, layout=layout, centre=centre)]
+    graph = [video_filter(src_info["width"], src_info["height"], ass, layout=layout, centre=centre, size=size)]
     if voice:
         args += ["-i", str(voice)]
     if not src_info["has_audio"]:
@@ -115,18 +179,28 @@ def render_clip_platform(src_path: str, src_info: dict, *, in_s: float, out_s: f
         graph.append(f"{game}aresample=48000,loudnorm=I=-14:TP=-1.5:LRA=11[a]")
     else:
         graph.append(f"{game}anull[a]")
-    args += ["-filter_complex", ";".join(graph), "-map", "[v]", "-map", "[a]",
-             "-c:v", "libx264", "-preset", preset, "-crf", "20", "-profile:v", "high", "-pix_fmt", "yuv420p",
-             "-r", str(FPS), "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-t", f"{dur:.3f}",
-             "-movflags", "+faststart", str(out_path)]
-    media.run(args)
+    tail = ["-pix_fmt", "yuv420p", "-r", str(FPS), "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-t", f"{dur:.3f}",
+            "-movflags", "+faststart", str(out_path)]
+    base = args + ["-filter_complex", ";".join(graph), "-map", "[v]", "-map", "[a]"]
+    try:
+        media.run(base + _video_codec_args(encoder, preset) + tail)
+    except Exception:
+        if encoder != "nvenc":
+            raise
+        media.run(base + _video_codec_args("libx264", preset) + tail)   # GPU busy or gone: CPU instead
     return out_path
 
 
 def render_pending(conn, settings: Settings, voice: VoiceProvider | None = None, *,
-                   clip_ids: list[int] | None = None, layout: str = "auto") -> dict:
+                   clip_ids: list[int] | None = None, layout: str = "auto", size: str | None = None,
+                   encoder: str | None = None, reuse: bool | None = None, preset: str | None = None) -> dict:
+    """Render every scripted clip. size/encoder/reuse/preset default to the VICEPULSE_RENDER_* settings."""
     voice = voice or make_voice(settings)
-    preset = os.environ.get("VICEPULSE_X264_PRESET", "medium")
+    preset = preset or os.environ.get("VICEPULSE_X264_PRESET", "medium")
+    out_size = render_size(size)
+    enc = pick_encoder(encoder)
+    if reuse is None:
+        reuse = os.environ.get("VICEPULSE_RENDER_REUSE", "0") == "1"
     rows = conn.execute(
         """SELECT cl.*, ch.key AS channel_key, c.source_id, s.file_path FROM clips cl
            JOIN channels ch ON ch.id = cl.channel_id
@@ -143,11 +217,17 @@ def render_pending(conn, settings: Settings, voice: VoiceProvider | None = None,
             centre, spread = action_center(clip["file_path"], clip["in_s"], clip["out_s"], work)
             use_layout = "crop" if (layout == "crop" or spread < 0.55) else "blur"
         voice_path = voice.voice_for(dict(clip))
+        shared: Path | None = None
         for platform in PLATFORMS:
             path = settings.dir("renders", clip["channel_key"], str(clip["for_date"])) / f"clip{clip['id']}_{platform}.mp4"
-            render_clip_platform(clip["file_path"], info, in_s=clip["in_s"], out_s=clip["out_s"],
-                                 cues=clip["script"]["captions"], platform=platform, out_path=path,
-                                 voice=voice_path, layout=use_layout, centre=centre, preset=preset)
+            if reuse and shared is not None:
+                _same_file(shared, path)       # one encode for every platform
+            else:
+                render_clip_platform(clip["file_path"], info, in_s=clip["in_s"], out_s=clip["out_s"],
+                                     cues=clip["script"]["captions"], platform="shared" if reuse else platform,
+                                     out_path=path, voice=voice_path, layout=use_layout, centre=centre, preset=preset,
+                                     size=out_size, encoder=enc)
+                shared = path
             meta = media.probe(path)
             conn.execute(
                 """INSERT INTO renders (clip_id, platform, file_path, file_sha256, width, height, duration_s,
@@ -163,7 +243,8 @@ def render_pending(conn, settings: Settings, voice: VoiceProvider | None = None,
         conn.execute("UPDATE clips SET status = 'rendered', voice_path = %s WHERE id = %s",
                      (str(voice_path) if voice_path else None, clip["id"]))
         db.log_event(conn, "render", "clip", clip["id"], "rendered",
-                     {"layout": use_layout, "voice": voice_path is not None})
+                     {"layout": use_layout, "voice": voice_path is not None, "size": f"{out_size[0]}x{out_size[1]}",
+                      "encoder": enc, "encodes": 1 if reuse else len(PLATFORMS)})
         out["rendered"].append(clip["id"])
         conn.commit()
     return out

@@ -37,6 +37,8 @@ def make_handler(settings: Settings):
             self._send(200, {"ok": True}) if self.path == "/healthz" else self._send(404, {"ok": False})
 
         def do_POST(self):  # noqa: N802
+            if self.path == "/feed-auth":
+                return self._feed_auth()
             if self.path != "/run":
                 return self._send(404, {"ok": False, "error": "not found"})
             token = self.headers.get("Authorization", "").removeprefix("Bearer ").strip()
@@ -53,6 +55,21 @@ def make_handler(settings: Settings):
             except Exception as e:
                 return self._send(500, {"ok": False, "error": f"{type(e).__name__}: {e}"})
             self._send(200, {"ok": True, **result})
+
+        def _feed_auth(self):
+            """MediaMTX asks here before accepting a stream (authMethod: http). 200 = allowed, 401 = refused.
+
+            The worker port is only reachable inside the docker network, and the stream key is compared hashed.
+            """
+            from . import db, feeds
+
+            try:
+                body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length", "0")), 65536)) or b"{}")
+                with db.connect(settings) as conn:
+                    ok = feeds.check_publish(conn, body)
+            except Exception:
+                ok = False
+            self._send(200 if ok else 401, {"ok": ok})
 
         def log_message(self, fmt, *args):  # keep tokens and bodies out of logs
             pass

@@ -32,6 +32,7 @@ import threading
 import time
 from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -268,10 +269,17 @@ def rights_for_session(conn, *, creator_id: int | None, own: bool) -> int:
     return cr["rights_id"]
 
 
+def check_channels(settings: Settings, channel_key: str, also: list[str] | None) -> list[str]:
+    known = {c["key"] for c in settings.channels()}
+    for ch in [channel_key, *(also or [])]:
+        if ch not in known:
+            raise ValueError(f"unknown VicePulse channel {ch!r}")
+    return [ch for ch in dict.fromkeys([channel_key, *(also or [])])]
+
+
 def start_session(conn, settings: Settings, tw: TwitchLive, login: str, channel_key: str, *,
-                  creator_id: int | None = None, own: bool = False) -> dict:
-    if channel_key not in {c["key"] for c in settings.channels()}:
-        raise ValueError(f"unknown VicePulse channel {channel_key!r}")
+                  creator_id: int | None = None, own: bool = False, also_channels: list[str] | None = None) -> dict:
+    channels = check_channels(settings, channel_key, also_channels)
     login = login.strip().lower().removeprefix("https://www.twitch.tv/").removeprefix("twitch.tv/").strip("/")
     if not re.fullmatch(r"\w{3,25}", login):
         raise ValueError("give the Twitch login (the name in twitch.tv/<login>)")
@@ -280,20 +288,91 @@ def start_session(conn, settings: Settings, tw: TwitchLive, login: str, channel_
     if not u:
         raise ValueError(f"no Twitch channel called {login}")
     row = conn.execute(
-        """INSERT INTO live_sessions (platform, broadcaster_id, login, display_name, channel_key, creator_id, rights_id)
-           VALUES ('twitch', %s, %s, %s, %s, %s, %s) RETURNING *""",
-        (u["id"], u["login"], u.get("display_name"), channel_key, creator_id, rid)).fetchone()
+        """INSERT INTO live_sessions (platform, broadcaster_id, login, display_name, channel_key, channels, creator_id,
+                                      rights_id)
+           VALUES ('twitch', %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+        (u["id"], u["login"], u.get("display_name"), channel_key, channels, creator_id, rid)).fetchone()
     db.log_event(conn, "live", "live_session", row["id"], "watching", {"login": u["login"], "channel": channel_key})
     conn.commit()
     return row
 
 
-def record_moment(conn, session_id: int, spike: dict) -> int:
+def record_moment(conn, session_id: int, spike: dict, *, kind: str = "chat") -> int:
     """Insert a moment; the database refuses it unless the session is live right now."""
     mid = conn.execute("INSERT INTO live_moments (session_id, score, signals) VALUES (%s, %s, %s) RETURNING id",
-                       (session_id, spike["score"], db.Jsonb({"chat": spike}))).fetchone()["id"]
+                       (session_id, spike["score"], db.Jsonb({kind: spike}))).fetchone()["id"]
     conn.commit()
     return mid
+
+
+# ---------------------------------------------------------------- one shared editing queue
+
+EDIT_LOCK_KEY = 7_406_771       # any fixed number; every VicePulse process uses the same one
+
+
+@contextmanager
+def edit_slot(settings: Settings):
+    """Hold the single editing slot shared by every watcher (Twitch and direct feeds, in any process).
+
+    A Postgres advisory lock: waiters are served in arrival order and the slot frees itself if a process dies,
+    so two heavy edits never run at once on this PC. Yields how many seconds were spent waiting.
+    """
+    t0 = _now()
+    conn = db.connect(settings)
+    try:
+        conn.execute("SELECT pg_advisory_lock(%s)", (EDIT_LOCK_KEY,))
+        conn.commit()
+        yield round(_now() - t0, 1)
+    finally:
+        try:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (EDIT_LOCK_KEY,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def run_edit(settings: Settings, session: dict, mid: int, detected: float, path: Path, timings: dict, sig: dict,
+             combined: float, *, min_combined: float, edit: Callable) -> list[int] | None:
+    """Score gate -> wait for the shared editing slot -> edit -> mark ready (or skipped / failed)."""
+    try:
+        if combined < min_combined:
+            _set(settings, mid, "skipped", f"not exciting enough (score {combined})", signals=sig, timings=timings)
+            return None
+        with edit_slot(settings) as waited:
+            timings["queued_s"] = waited
+            t_edit = _now()
+            clip_ids = edit(settings, session, mid, path)
+            timings["edit_only_s"] = round(_now() - t_edit, 1)
+        timings["edited_s"] = round(_now() - detected, 1)
+        if not clip_ids:
+            _set(settings, mid, "skipped", "the editor found no usable moment (or it duplicates an earlier clip)",
+                 signals=sig, timings=timings)
+            return None
+        latency = round(_now() - detected, 1)
+        _set(settings, mid, "ready", signals=sig, timings=timings, clip_ids=clip_ids,
+             ready_at=datetime.now(timezone.utc), latency_s=latency)
+        notify_ready(settings, session, clip_ids, latency, combined)
+        return clip_ids
+    except Exception as ex:
+        _set(settings, mid, "failed", f"editing: {ex}"[:300], timings=timings)
+        return None
+
+
+def notify_ready(settings: Settings, session: dict, clip_ids: list[int], latency: float, score: float) -> None:
+    from . import notify
+
+    if not notify.enabled():
+        return
+    try:
+        with db.connect(settings) as conn:
+            r = conn.execute("""SELECT r.file_path FROM renders r WHERE r.clip_id = %s
+                                ORDER BY (r.platform = 'youtube') DESC LIMIT 1""", (clip_ids[0],)).fetchone()
+        video = Path(r["file_path"]) if r else None
+        notify.send(f"New VicePulse {session['channel_key'].upper()} clip from {session['display_name'] or session['login']} "
+                    f"(live). Ready {latency:.0f} s after the moment, score {score}. Approve it on the review page.",
+                    video)
+    except Exception:
+        pass                                   # a notification must never break clipping
 
 
 def _set(settings: Settings, mid: int, status: str, reason: str | None = None, **cols) -> None:
@@ -513,40 +592,13 @@ class LiveRunner:
             with db.connect(self.settings) as conn:
                 chat = conn.execute("SELECT signals FROM live_moments WHERE id = %s", (mid,)).fetchone()["signals"]
             audio = audio_excitement(path)
-            combined = round(0.6 * float(chat.get("chat", {}).get("score", 0)) + 0.4 * audio, 3)
-            sig = {**chat, "audio_excitement": audio, "combined": combined}
-            if combined < self.min_combined:
-                _set(self.settings, mid, "skipped", f"not exciting enough (chat+audio score {combined})", signals=sig,
-                     timings=timings)
-                return
-            clip_ids = self.edit(self.settings, self.s, mid, path)
-            timings["edited_s"] = round(_now() - detected, 1)
-            if not clip_ids:
-                _set(self.settings, mid, "skipped", "the editor found no usable moment (or it duplicates an earlier "
-                                                    "clip)", signals=sig, timings=timings)
-                return
-            latency = round(_now() - detected, 1)
-            _set(self.settings, mid, "ready", signals=sig, timings=timings, clip_ids=clip_ids,
-                 ready_at=datetime.now(timezone.utc), latency_s=latency)
-            self._notify(clip_ids, latency, combined)
         except Exception as ex:
             _set(self.settings, mid, "failed", f"editing: {ex}"[:300], timings=timings)
-
-    def _notify(self, clip_ids: list[int], latency: float, score: float) -> None:
-        from . import notify
-
-        if not notify.enabled():
             return
-        try:
-            with db.connect(self.settings) as conn:
-                r = conn.execute("""SELECT r.file_path FROM renders r WHERE r.clip_id = %s
-                                    ORDER BY (r.platform = 'youtube') DESC LIMIT 1""", (clip_ids[0],)).fetchone()
-            video = Path(r["file_path"]) if r else None
-            notify.send(f"New VicePulse {self.s['channel_key'].upper()} clip from {self.s['display_name'] or self.s['login']} "
-                        f"(live). Ready {latency:.0f} s after the moment, score {score}. Approve it on the review page.",
-                        video)
-        except Exception:
-            pass                                   # a notification must never break clipping
+        combined = round(0.6 * float(chat.get("chat", {}).get("score", 0)) + 0.4 * audio, 3)
+        sig = {**chat, "audio_excitement": audio, "combined": combined}
+        run_edit(self.settings, self.s, mid, detected, path, timings, sig, combined, min_combined=self.min_combined,
+                 edit=self.edit)
 
     # -- main loop
     def run(self, *, until_end: bool = True, max_hours: float = 16) -> dict:
@@ -580,8 +632,30 @@ class LiveRunner:
         return {"session": self.s["id"], "login": self.s["login"], "moments": {r["status"]: r["n"] for r in rows}}
 
 
+def live_render_opts() -> dict:
+    """Live clips render small and fast: 720x1280, the GPU encoder when reachable, one encode for all platforms."""
+    import os
+
+    return {"size": os.environ.get("VICEPULSE_LIVE_RENDER_SIZE", "720x1280"),
+            "encoder": os.environ.get("VICEPULSE_LIVE_ENCODER", "auto"),
+            "preset": os.environ.get("VICEPULSE_LIVE_X264_PRESET", "veryfast"),
+            "reuse": os.environ.get("VICEPULSE_LIVE_RENDER_REUSE", "1") == "1"}
+
+
+def session_channels(session: dict) -> list[str]:
+    """Every VicePulse channel that gets a version of this session's moments (main channel first)."""
+    out = [session["channel_key"]]
+    for ch in session.get("channels") or []:
+        if ch not in out:
+            out.append(ch)
+    return out
+
+
 def default_edit(settings: Settings, session: dict, mid: int, path: Path) -> list[int]:
-    """The existing pipeline: rights gate, best window, subtitles, vertical render, final check -> review queue."""
+    """The existing pipeline: rights gate, best window, subtitles, vertical render, final check -> review queue.
+
+    One version per channel in the session (e.g. EN and BR), each with captions in that channel's language.
+    """
     from .autosource import _clip_and_render
     from .llm import make_llm
 
@@ -593,8 +667,8 @@ def default_edit(settings: Settings, session: dict, mid: int, path: Path) -> lis
         conn.commit()
         if res["status"] not in ("cleared", "analysed"):
             raise ValueError("rights gate refused the clip: " + "; ".join(res.get("reasons") or []))
-        return _clip_and_render(conn, settings, make_llm(settings), res["source_id"], channels=[session["channel_key"]],
-                                clip_seconds=45, max_clips=1, ignore_day_limit=True)
+        return _clip_and_render(conn, settings, make_llm(settings), res["source_id"], channels=session_channels(session),
+                                clip_seconds=45, max_clips=1, ignore_day_limit=True, render_opts=live_render_opts())
 
 
 def status(conn, *, limit: int = 30) -> dict:

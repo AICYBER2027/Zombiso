@@ -254,15 +254,19 @@ class ReviewApp:
             out.append('<div class=empty>No streams watched yet. Start one with <code>vicepulse live-watch --twitch '
                        '&lt;login&gt; --channel br --creator-id N</code>.</div>')
         else:
-            out.append('<table><tr><th>Streamer</th><th>Status</th><th>Chat now</th><th>Normal</th><th>Spike score</th>'
+            out.append('<table><tr><th>Streamer</th><th>Status</th><th>Chat / audio now</th><th>Normal</th><th>Spike score</th>'
                        '<th>Since</th></tr>')
             for s in st["sessions"]:
                 badge = "LIVE" if s["status"] == "live" else s["status"].upper()
-                out.append(f'<tr><td><b>{e(s["display_name"] or s["login"])}</b> <span class=tag>{e(s["channel_key"]).upper()}</span>'
+                unit = "dB" if s.get("platform") == "feed" else "msg/s"
+                src = "DIRECT FEED" if s.get("platform") == "feed" else "TWITCH"
+                langs = " + ".join(c.upper() for c in (s.get("channels") or [s["channel_key"]]))
+                out.append(f'<tr><td><b>{e(s["display_name"] or s["login"])}</b> <span class=tag>{e(langs)}</span> '
+                           f'<span class=tag>{src}</span>'
                            f'<div class=meta>{e(s["stream_title"] or "")}</div></td>'
                            f'<td><span class=tag style="{"background:var(--no);color:#fff" if badge == "LIVE" else ""}">{badge}</span></td>'
-                           f'<td>{e(s["chat_rate"] if s["chat_rate"] is not None else "-")} msg/s</td>'
-                           f'<td>{e(s["chat_baseline"] if s["chat_baseline"] is not None else "-")} msg/s</td>'
+                           f'<td>{e(s["chat_rate"] if s["chat_rate"] is not None else "-")} {unit}</td>'
+                           f'<td>{e(s["chat_baseline"] if s["chat_baseline"] is not None else "-")} {unit}</td>'
                            f'<td>{e(s["last_score"] if s["last_score"] is not None else "-")}</td>'
                            f'<td class=meta>{e((s["started_at"] or s["created_at"]).strftime("%d/%m %H:%M"))}</td></tr>')
             out.append('</table>')
@@ -274,7 +278,8 @@ class ReviewApp:
                        '<th>Time to clip</th><th></th></tr>')
             for m in st["moments"]:
                 sig = m["signals"] or {}
-                score = f'chat {sig.get("chat", {}).get("score", m["score"])}'
+                score = (f'audio {sig["audio"].get("score")} (+{sig["audio"].get("rise_db")} dB)' if "audio" in sig
+                         else f'chat {sig.get("chat", {}).get("score", m["score"])}')
                 if "audio_excitement" in sig:
                     score += f' &middot; audio {sig["audio_excitement"]} &middot; total {sig.get("combined")}'
                 if sig.get("merged"):

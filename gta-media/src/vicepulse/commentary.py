@@ -86,6 +86,17 @@ def build_captions(settings: Settings, clip: dict, result: dict, transcriber=Non
 
         tr = transcriber or signals.make_transcriber(settings)
         segments = tr.transcribe(clip["file_path"], start=clip["in_s"], duration=duration)
+        target = str(clip.get("language") or "")[:2].lower()
+        spoken = str(getattr(tr, "language", "") or "")[:2].lower()
+        if segments and target and spoken and spoken != target:
+            # The speech is in another language than this channel's (e.g. a Brazilian streamer on the EN channel).
+            if target == "en":
+                segments = tr.transcribe(clip["file_path"], start=clip["in_s"], duration=duration, task="translate")
+                speech = transcript_cues(segments, duration)
+                return speech, f"transcript ({spoken} speech translated to English by Whisper)" if speech else "none"
+            # No offline English->Portuguese translator is installed yet: use the channel-language script instead
+            # of subtitles in the wrong language.
+            return caption_cues(result, duration), f"script (speech is {spoken}; no {spoken}->{target} translator)"
         speech = transcript_cues(segments, duration)
         if speech or settings.captions == "transcript":
             if settings.llm_mode == "mock":

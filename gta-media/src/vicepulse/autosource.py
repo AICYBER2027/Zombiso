@@ -250,7 +250,8 @@ def _highlight_result(conn, settings: Settings, source_id: int, ids: list[int], 
 # ---------------------------------------------------------------- the automatic run
 
 def _clip_and_render(conn, settings: Settings, llm: LLM, source_id: int, *, channels: list[str], clip_seconds: float,
-                     max_clips: int, why: list | None = None, ignore_day_limit: bool = False) -> list[int]:
+                     max_clips: int, why: list | None = None, ignore_day_limit: bool = False,
+                     render_opts: dict | None = None) -> list[int]:
     duration = conn.execute("SELECT duration_s FROM sources WHERE id = %s", (source_id,)).fetchone()["duration_s"] or 0
     sig = signals.extract(conn, settings, source_id, window_s=min(clip_seconds, max(duration, 1)))
     tri = selection.triage_new(conn, settings, llm)
@@ -264,7 +265,7 @@ def _clip_and_render(conn, settings: Settings, llm: LLM, source_id: int, *, chan
                         "filtered": sel.get("filtered", []), "duplicates": sel.get("duplicates", [])})
     if clip_ids:
         commentary.write_scripts(conn, settings, llm, clip_ids=clip_ids)
-        render.render_pending(conn, settings, clip_ids=clip_ids)
+        render.render_pending(conn, settings, clip_ids=clip_ids, **(render_opts or {}))
         policy.final_check(conn, settings, llm, clip_ids=clip_ids)
     return clip_ids
 

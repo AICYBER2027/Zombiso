@@ -1,0 +1,43 @@
+# VicePulse direct-feed receiver (MediaMTX 1.9.3).
+#
+# Creators send a second copy of their live stream here (an extra OBS output). No secrets in this file:
+# every publish attempt is checked by the VicePulse worker (stream keys are stored hashed in the database).
+# Reading (VicePulse's own audio listener) and the API are only reachable inside the docker network.
+# The recording is a rolling buffer for clipping live moments, not an archive: chunks are deleted after 10 min.
+
+logLevel: info
+
+api: yes
+apiAddress: :9997
+metrics: no
+pprof: no
+playback: no
+
+rtmp: yes
+rtmpAddress: :1935
+rtsp: yes
+rtspAddress: :8554
+hls: no
+webrtc: no
+srt: no
+
+authMethod: http
+authHTTPAddress: http://worker:8088/feed-auth
+authHTTPExclude:
+  - action: read
+  - action: playback
+  - action: api
+  - action: metrics
+  - action: pprof
+
+pathDefaults:
+  record: yes
+  recordPath: /data/feeds/rec/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordFormat: mpegts
+  recordPartDuration: 1s
+  recordSegmentDuration: 6s
+  recordDeleteAfter: 10m
+
+paths:
+  # Only VicePulse feed names are accepted: rtmp://<host>:1935/vp/<feed>
+  "~^vp/[a-z0-9_-]{3,40}$": {}
