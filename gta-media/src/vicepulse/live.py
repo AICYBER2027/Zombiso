@@ -639,7 +639,9 @@ def live_render_opts() -> dict:
     return {"size": os.environ.get("VICEPULSE_LIVE_RENDER_SIZE", "720x1280"),
             "encoder": os.environ.get("VICEPULSE_LIVE_ENCODER", "auto"),
             "preset": os.environ.get("VICEPULSE_LIVE_X264_PRESET", "veryfast"),
-            "reuse": os.environ.get("VICEPULSE_LIVE_RENDER_REUSE", "1") == "1"}
+            "reuse": os.environ.get("VICEPULSE_LIVE_RENDER_REUSE", "1") == "1",
+            # cinematic | viral | clean, or classic (the original template). Empty = VICEPULSE_EDIT_STYLE.
+            "style": os.environ.get("VICEPULSE_LIVE_EDIT_STYLE") or None}
 
 
 def session_channels(session: dict) -> list[str]:

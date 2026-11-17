@@ -38,7 +38,12 @@ def probe(path: str | Path) -> dict:
     data = json.loads(out)
     video = next((s for s in data["streams"] if s["codec_type"] == "video"), None)
     audio = next((s for s in data["streams"] if s["codec_type"] == "audio"), None)
+    fps = 0.0
+    if video and "/" in str(video.get("avg_frame_rate", "")):
+        num, den = video["avg_frame_rate"].split("/")
+        fps = float(num) / float(den) if float(den) else 0.0
     return {
+        "fps": round(fps, 3),
         "duration": float(data["format"].get("duration", 0.0)),
         "width": int(video["width"]) if video else 0,
         "height": int(video["height"]) if video else 0,

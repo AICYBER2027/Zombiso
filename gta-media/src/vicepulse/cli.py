@@ -86,7 +86,47 @@ def cmd_script(a, s, conn):
 
 
 def cmd_render(a, s, conn):
-    return render.render_pending(conn, s, clip_ids=_ids(a.clips), layout=a.layout)
+    return render.render_pending(conn, s, clip_ids=_ids(a.clips), layout=a.layout, style=a.style)
+
+
+def _facecam(text: str | None) -> dict | None:
+    """'x,y,w,h' (fractions of the source frame, e.g. 0.02,0.6,0.25,0.35) plus optional ':split' or ':pip'."""
+    if not text:
+        return None
+    box, _, mode = text.partition(":")
+    x, y, w, h = (float(v) for v in box.split(","))
+    if not (0 <= x < 1 and 0 <= y < 1 and 0 < w <= 1 - x + 1e-6 and 0 < h <= 1 - y + 1e-6):
+        raise ValueError("--facecam must be x,y,w,h fractions inside the frame")
+    return {"x": x, "y": y, "w": w, "h": h, "mode": mode or "pip"}
+
+
+def cmd_style_compare(a, s, conn):
+    """Render one highlight in several edit styles, side by side, with timings and quality checks."""
+    from . import styles
+
+    if a.clip:
+        clip = conn.execute(
+            """SELECT cl.*, ch.key AS channel_key, c.source_id, s.file_path FROM clips cl
+               JOIN channels ch ON ch.id = cl.channel_id JOIN candidates c ON c.id = cl.candidate_id
+               JOIN sources s ON s.id = c.source_id WHERE cl.id = %s""", (a.clip,)).fetchone()
+        if clip is None:
+            raise ValueError(f"unknown clip {a.clip}")
+        from . import rights
+
+        rights.require_cleared_source(conn, clip["source_id"])      # only licensed footage
+        src, in_s, out_s = clip["file_path"], clip["in_s"], clip["out_s"]
+        cues = (clip["script"] or {}).get("captions", [])
+        brand = render.channel_brand(s, clip["channel_key"])
+    else:
+        if not a.own_test_footage:
+            raise ValueError("--file needs --own-test-footage (you made it yourself), or use --clip for licensed footage")
+        src, in_s, out_s = a.file, a.start, a.end
+        cues = json.loads(open(a.captions_json, encoding="utf-8").read()) if a.captions_json else []
+        brand = render.channel_brand(s, a.channel) if a.channel else {}
+    return render.compare_styles(src, in_s=in_s, out_s=out_s, cues=cues, styles_=a.styles.split(","),
+                                 out_dir=a.out_dir or str(s.dir("work", "style-compare")), size=a.size,
+                                 encoder=a.encoder, platform=a.platform, brand=brand, facecam=_facecam(a.facecam),
+                                 layout=a.layout)
 
 
 def cmd_check(a, s, conn):
@@ -395,6 +435,23 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("render", cmd_render, "render 1080x1920 files with burned captions")
     sp.add_argument("--clips")
     sp.add_argument("--layout", default="auto", choices=["auto", "crop", "blur"])
+    sp.add_argument("--style", help="cinematic | viral | clean (default VICEPULSE_EDIT_STYLE, else the classic template)")
+    sp = add("style-compare", cmd_style_compare, "render one highlight in the Cinematic, Funny/Viral and Clean styles")
+    sp.add_argument("--clip", type=int, help="a scripted clip from licensed footage")
+    sp.add_argument("--file", help="a video you made yourself (needs --own-test-footage)")
+    sp.add_argument("--own-test-footage", action="store_true")
+    sp.add_argument("--start", type=float, default=0.0)
+    sp.add_argument("--end", type=float)
+    sp.add_argument("--captions-json", help="caption cues [{start,end,text,kind}] for --file")
+    sp.add_argument("--channel", choices=["en", "br"], help="use this channel's branding")
+    sp.add_argument("--styles", default="cinematic,viral,clean")
+    sp.add_argument("--size", default="720x1280")
+    sp.add_argument("--encoder", default="auto", choices=["auto", "nvenc", "libx264"])
+    sp.add_argument("--platform", default="shared", choices=["shared", "youtube", "instagram", "tiktok"])
+    sp.add_argument("--layout", default="auto", choices=["auto", "crop", "blur"],
+                    help="crop = follow the action in a 9:16 crop; blur = whole frame on a blurred fill")
+    sp.add_argument("--facecam", help="x,y,w,h of the facecam in the source (fractions), plus :pip or :split")
+    sp.add_argument("--out-dir")
     sp = add("check", cmd_check, "final policy and quality check, then queue for approval")
     sp.add_argument("--clips")
     add("accounts-check", cmd_accounts_check, "check which YouTube/Instagram account each stored login opens (read-only)")
@@ -515,6 +572,8 @@ def run(argv: list[str], settings: Settings | None = None) -> dict:
 
         review.serve(settings, args.host, args.port)
         return {}
+    if args.command == "style-compare" and not args.clip:
+        return args.fn(args, settings, None)          # own test footage: no database needed
     conn = db.connect(settings)
     try:
         return args.fn(args, settings, conn)

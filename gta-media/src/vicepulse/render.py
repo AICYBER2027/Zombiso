@@ -191,10 +191,69 @@ def render_clip_platform(src_path: str, src_info: dict, *, in_s: float, out_s: f
     return out_path
 
 
+def channel_brand(settings: Settings, channel_key: str) -> dict:
+    """Branding for a channel's styled edits (channels.json "brand"), e.g. handle, accent colour, outro line."""
+    try:
+        ch = settings.channel(channel_key)
+    except (KeyError, OSError):
+        return {}
+    return {"name": ch.get("name", ""), **(ch.get("brand") or {})}
+
+
+def edit_style(value: str | None = None) -> str | None:
+    """None = the classic template; else cinematic | viral | clean (default VICEPULSE_EDIT_STYLE)."""
+    from . import styles
+
+    value = value or os.environ.get("VICEPULSE_EDIT_STYLE", "")
+    return None if value.strip().lower() in ("", "classic", "none") else styles.style_name(value)
+
+
+def compare_styles(src: str, *, in_s: float, out_s: float | None, cues: list[dict], styles_: list[str], out_dir: str,
+                   size: str = "720x1280", encoder: str = "auto", platform: str = "shared", brand: dict | None = None,
+                   facecam: dict | None = None, layout: str = "auto") -> dict:
+    """The same highlight in several styles: one analysis, one render per style, quality checks, and a
+    side-by-side preview video for comparing them."""
+    from . import styles
+
+    info = media.probe(src)
+    out_s = out_s if out_s is not None else info["duration"]
+    out_size = render_size(size)
+    enc = pick_encoder(encoder)
+    folder = Path(out_dir)
+    folder.mkdir(parents=True, exist_ok=True)
+    analysis = styles.analyse(src, info, in_s, out_s, cues)
+    results = []
+    for name in [styles.style_name(x) for x in styles_]:
+        res = styles.render_styled(src, info, in_s=in_s, out_s=out_s, cues=cues, style=name, platform=platform,
+                                   out_path=folder / f"{name}.mp4", size=out_size, encoder=enc, preset="veryfast",
+                                   brand=brand, facecam=facecam, analysis=analysis, layout=layout)
+        res["qc"] = styles.quality_check(res["path"], size=out_size, duration=res["plan"]["duration"])
+        results.append(res)
+    preview = folder / "side_by_side.mp4"
+    n = len(results)
+    if n > 1:
+        ins = sum((["-i", r["path"]] for r in results), [])
+        font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        lab = "".join(f"[{i}:v]scale=360:640,drawtext=fontfile={font}:text='{styles.LABELS[r['style']]}':x=(w-tw)/2:y=24:"
+                      f"fontsize=26:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=8[p{i}];" for i, r in enumerate(results))
+        graph = lab + "".join(f"[p{i}]" for i in range(n)) + f"hstack=inputs={n}[v]"
+        media.run(["ffmpeg", "-v", "error", "-y", *ins, "-filter_complex", graph, "-map", "[v]", "-map", "0:a?",
+                   *_video_codec_args(enc, "veryfast"), "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                   str(preview)])
+    analysis_out = {**analysis, "events": [vars(e) for e in analysis["events"]]}
+    return {"source": src, "in_s": in_s, "out_s": out_s, "size": f"{out_size[0]}x{out_size[1]}", "encoder": enc,
+            "analysis": analysis_out, "styles": results, "side_by_side": str(preview) if n > 1 else None}
+
+
 def render_pending(conn, settings: Settings, voice: VoiceProvider | None = None, *,
                    clip_ids: list[int] | None = None, layout: str = "auto", size: str | None = None,
-                   encoder: str | None = None, reuse: bool | None = None, preset: str | None = None) -> dict:
-    """Render every scripted clip. size/encoder/reuse/preset default to the VICEPULSE_RENDER_* settings."""
+                   encoder: str | None = None, reuse: bool | None = None, preset: str | None = None,
+                   style: str | None = None) -> dict:
+    """Render every scripted clip. size/encoder/reuse/preset default to the VICEPULSE_RENDER_* settings.
+
+    style: cinematic | viral | clean uses the event-driven edit styles (styles.py); None keeps the classic template
+    (default VICEPULSE_EDIT_STYLE)."""
+    style = edit_style(style)
     voice = voice or make_voice(settings)
     preset = preset or os.environ.get("VICEPULSE_X264_PRESET", "medium")
     out_size = render_size(size)
@@ -218,10 +277,25 @@ def render_pending(conn, settings: Settings, voice: VoiceProvider | None = None,
             use_layout = "crop" if (layout == "crop" or spread < 0.55) else "blur"
         voice_path = voice.voice_for(dict(clip))
         shared: Path | None = None
+        styled: dict | None = None
+        analysis = None
+        if style:
+            from . import styles
+
+            cues = clip["script"]["captions"]
+            analysis = styles.analyse(clip["file_path"], info, clip["in_s"], clip["out_s"], cues)
         for platform in PLATFORMS:
             path = settings.dir("renders", clip["channel_key"], str(clip["for_date"])) / f"clip{clip['id']}_{platform}.mp4"
             if reuse and shared is not None:
                 _same_file(shared, path)       # one encode for every platform
+            elif style:
+                styled = styles.render_styled(
+                    clip["file_path"], info, in_s=clip["in_s"], out_s=clip["out_s"], cues=cues, style=style,
+                    platform="shared" if reuse else platform, out_path=path, size=out_size, encoder=enc,
+                    preset=preset, voice=voice_path, brand=channel_brand(settings, clip["channel_key"]),
+                    layout=layout, analysis=analysis)
+                styled["qc"] = styles.quality_check(path, size=out_size, duration=styled["plan"]["duration"])
+                shared = path
             else:
                 render_clip_platform(clip["file_path"], info, in_s=clip["in_s"], out_s=clip["out_s"],
                                      cues=clip["script"]["captions"], platform="shared" if reuse else platform,
@@ -242,9 +316,13 @@ def render_pending(conn, settings: Settings, voice: VoiceProvider | None = None,
             out["files"].append(str(path))
         conn.execute("UPDATE clips SET status = 'rendered', voice_path = %s WHERE id = %s",
                      (str(voice_path) if voice_path else None, clip["id"]))
-        db.log_event(conn, "render", "clip", clip["id"], "rendered",
-                     {"layout": use_layout, "voice": voice_path is not None, "size": f"{out_size[0]}x{out_size[1]}",
-                      "encoder": enc, "encodes": 1 if reuse else len(PLATFORMS)})
+        detail = {"layout": use_layout, "voice": voice_path is not None, "size": f"{out_size[0]}x{out_size[1]}",
+                  "encoder": enc, "encodes": 1 if reuse else len(PLATFORMS), "style": style or "classic"}
+        if styled:
+            # Why each effect is there (the event that triggered it) and the last quality check.
+            detail.update(layout=styled["plan"]["layout"], encoder=styled["encoder"], plan=styled["plan"],
+                          qc=styled["qc"])
+        db.log_event(conn, "render", "clip", clip["id"], "rendered", detail)
         out["rendered"].append(clip["id"])
         conn.commit()
     return out

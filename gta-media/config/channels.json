@@ -25,7 +25,14 @@
         "#Gaming",
         "#VicePulse"
       ],
-      "instagram_username": "vicepulse.en"
+      "instagram_username": "vicepulse.en",
+      "brand": {
+        "handle": "@vicepulse-en",
+        "colour": "#FFD600",
+        "outro_text": "Follow for more",
+        "intro_text": "",
+        "credit": ""
+      }
     },
     {
       "key": "br",
@@ -53,7 +60,14 @@
         "#VicePulse"
       ],
       "instagram_username": "vicepulse.brasil",
-      "youtube_handle": "@VicePulse-BRASIL"
+      "youtube_handle": "@VicePulse-BRASIL",
+      "brand": {
+        "handle": "@vicepulse-brasil",
+        "colour": "#FFD600",
+        "outro_text": "Siga para mais",
+        "intro_text": "",
+        "credit": ""
+      }
     }
   ]
 }
