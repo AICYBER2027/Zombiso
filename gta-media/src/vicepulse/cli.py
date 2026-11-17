@@ -132,7 +132,7 @@ def cmd_live_watch(a, s, conn):
     tw = live.TwitchLive(s)
     row = live.start_session(conn, s, tw, a.twitch, a.channel, creator_id=a.creator_id, own=a.own)
     det = live.SpikeDetector(threshold=a.threshold)
-    runner = live.LiveRunner(s, row, tw=tw, detector=det, capture_delay_s=a.delay)
+    runner = live.LiveRunner(s, row, tw=tw, detector=det, chat_latency_s=a.chat_latency)
     print(json.dumps({"watching": row["login"], "session": row["id"], "channel": a.channel,
                       "live_publishing": "on" if s.allow_live_publish else "off"}), flush=True)
     return runner.run(until_end=not a.keep_waiting, max_hours=a.max_hours)
@@ -347,7 +347,8 @@ def build_parser() -> argparse.ArgumentParser:
     who.add_argument("--creator-id", type=int, help="the authorized creator (Creators tab)")
     who.add_argument("--own", action="store_true", help="your own stream")
     sp.add_argument("--threshold", type=float, default=0.55, help="spike score needed (0-1)")
-    sp.add_argument("--delay", type=float, default=20.0, help="seconds after a spike before the clip is taken")
+    sp.add_argument("--chat-latency", type=float, default=8.0,
+                    help="seconds between the moment on stream and the chat reacting (shifts the 20 s/60 s window)")
     sp.add_argument("--keep-waiting", action="store_true", help="keep watching after the stream ends")
     sp.add_argument("--max-hours", type=float, default=16.0)
     add("live-status", cmd_live_status, "live sessions and detected moments")

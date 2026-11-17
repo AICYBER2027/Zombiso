@@ -6,8 +6,10 @@ How it works, for one watched broadcaster:
   2. While live, the public chat is read (anonymous IRC, read-only) and a spike detector compares the chat
      speed of the last few seconds with its own recent baseline, plus hype words, laughter and repeated
      messages ("KEKW", "kkkk", the same message spammed).
-  3. On a spike, after a short wait (so the clip also holds what happens next), VicePulse asks Twitch to make
-     a clip (Create Clip: up to 60 s of the live stream; Twitch only allows it while the stream is live).
+  3. On a spike, VicePulse asks Twitch for clips (Create Clip; Twitch only allows it while the stream is live).
+     One Twitch clip is at most 60 s and ends ~5 s after the request, so the 20 s before + 60 s after segment
+     is two clips taken ~27 s and ~47 s after the spike (60 s and 25 s long), joined on their 5 s overlap by
+     matching the audio. If the stream ends before the second clip, the first one is used on its own.
   4. The clip file is fetched with Get Clips Download. Twitch only allows this when VicePulse's Twitch account
      is an editor of that channel, so the broadcaster's own setting is the permission check.
   5. The clip's own audio is scored (loudness jump), so a moment is never kept on chat alone; then the
@@ -41,6 +43,7 @@ from . import accounts, db, ingest, signals
 from .config import Settings
 
 HELIX = "https://api.twitch.tv/helix"
+TWITCH_TAIL_S = 5.0        # a Twitch clip ends about this long after the Create Clip request (Twitch docs)
 HYPE = re.compile(r"^(?:kekw|lulw?|omegalul|lmf?ao+|lo+l+|xd+|pog+(?:champ|gers|u)?|w+|gg+|wtf+|monkas|holy|clip+(?:it)?|"
                   r"clipa+|clipou|k{3,}|(?:ha){2,}h?|(?:rs){2,}|caralho|nossa+|meu+deus|mds+|vish+|eita+|kkkk+)$", re.I)
 WORD = re.compile(r"[\w']+", re.U)
@@ -302,6 +305,55 @@ def _set(settings: Settings, mid: int, status: str, reason: str | None = None, *
         conn.commit()
 
 
+def find_join(a: Path, b: Path, *, expected_overlap_s: float, search_s: float = 4.0) -> tuple[float, str]:
+    """Where in clip A clip B starts (seconds from A's start), found by matching B's first seconds in A's audio.
+
+    Twitch clip timing drifts by a second or two, so the expected overlap is only a starting guess. Falls back to
+    the guess when the audio is silent, numpy is missing or the match is weak.
+    """
+    from .media import probe
+
+    a_dur = probe(a)["duration"]
+    guess = max(0.0, a_dur - expected_overlap_s)
+    try:
+        import numpy as np
+
+        sr = 16000
+        tail_start = max(0.0, guess - search_s)
+        tail = signals.decode_audio_16k(a, start=tail_start, duration=a_dur - tail_start)
+        head = signals.decode_audio_16k(b, duration=min(2.0, expected_overlap_s))
+        if len(head) < sr // 2 or len(tail) < len(head) or float(np.std(head)) < 1e-3:
+            return guess, "expected overlap (no usable audio to match)"
+        n = len(tail) + len(head)
+        size = 1 << (n - 1).bit_length()
+        corr = np.fft.irfft(np.fft.rfft(tail, size) * np.conj(np.fft.rfft(head, size)), size)[: len(tail) - len(head) + 1]
+        energy = np.sqrt(np.convolve(tail ** 2, np.ones(len(head)), "valid")) * np.linalg.norm(head) + 1e-9
+        norm = corr / energy
+        lag = int(np.argmax(norm))
+        if norm[lag] < 0.5:
+            return guess, f"expected overlap (weak audio match {norm[lag]:.2f})"
+        return tail_start + lag / sr, f"audio match {norm[lag]:.2f}"
+    except ImportError:
+        return guess, "expected overlap (numpy not installed)"
+
+
+def stitch(a: Path, b: Path, out: Path, *, expected_overlap_s: float) -> dict:
+    """Join two consecutive Twitch clips into one segment: A up to where B starts, then all of B."""
+    from .media import probe, run
+
+    cut, how = find_join(a, b, expected_overlap_s=expected_overlap_s)
+    info = probe(a)
+    w, h = info["width"], info["height"]
+    graph = (f"[0:v]trim=0:{cut:.3f},setpts=PTS-STARTPTS,fps=30,format=yuv420p[v0];"
+             f"[0:a]atrim=0:{cut:.3f},asetpts=PTS-STARTPTS,aresample=48000[a0];"
+             f"[1:v]scale={w}:{h},setsar=1,fps=30,format=yuv420p[v1];[1:a]aresample=48000[a1];"
+             "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]")
+    run(["ffmpeg", "-y", "-nostdin", "-v", "error", "-i", str(a), "-i", str(b), "-filter_complex", graph,
+         "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac",
+         "-b:a", "160k", "-movflags", "+faststart", str(out)])
+    return {"cut_at_s": round(cut, 2), "join": how, "duration_s": round(probe(out)["duration"], 1)}
+
+
 def audio_excitement(path: Path) -> float:
     """0..1: how far the loudest moments rise above the clip's typical level (0 if there is no audio)."""
     curve = [v for _, v in signals.loudness_curve(path) if v > -70]
@@ -316,14 +368,24 @@ class LiveRunner:
     """Watches one session: live status, chat, spikes, captures (threads) and edits (one at a time)."""
 
     def __init__(self, settings: Settings, session_row: dict, *, tw: TwitchLive | None = None,
-                 detector: SpikeDetector | None = None, capture_delay_s: float = 20.0, clip_seconds: float = 45,
+                 detector: SpikeDetector | None = None, before_s: float = 20.0, after_s: float = 60.0,
+                 chat_latency_s: float = 8.0, overlap_s: float = 5.0, call_a_s: float | None = None,
+                 call_b_s: float | None = None, clip_seconds: float = 45,
                  min_combined: float = 0.45, poll_s: float = 15.0, chat_factory=TwitchChat,
                  edit: Callable[[Settings, dict, int, Path], list[int]] | None = None):
         self.settings, self.s = settings, dict(session_row)
         self.tw = tw or TwitchLive(settings)
         self.detector = detector or SpikeDetector()
-        self.capture_delay_s, self.clip_seconds, self.min_combined, self.poll_s = (
-            capture_delay_s, clip_seconds, min_combined, poll_s)
+        self.clip_seconds, self.min_combined, self.poll_s = clip_seconds, min_combined, poll_s
+        # A Twitch clip is at most 60 s and ends about TWITCH_TAIL_S after the request, so the 20 s before + 60 s
+        # after segment is two clips: A = [-before, 60 - before], B = [60 - before - overlap, +after], joined on
+        # the overlap. The moment itself happened about chat_latency_s before chat reacted.
+        tail = TWITCH_TAIL_S
+        first_end = 60.0 - before_s
+        self.call_a_s = call_a_s if call_a_s is not None else max(0.0, first_end - tail - chat_latency_s)
+        self.call_b_s = call_b_s if call_b_s is not None else max(self.call_a_s, after_s - tail - chat_latency_s)
+        self.dur_b = max(5.0, min(60.0, after_s - first_end + overlap_s)) if after_s > first_end else 0.0
+        self.overlap_s = overlap_s
         self.chat_factory, self.chat = chat_factory, None
         self.edit = edit or default_edit
         self.edits = ThreadPoolExecutor(max_workers=1, thread_name_prefix="edit")
@@ -399,25 +461,46 @@ class LiveRunner:
         return mid
 
     # -- capture -> download -> edit
+    def _at(self, t: float) -> bool:
+        """Wait until wall time t; False if the watcher was stopped meanwhile."""
+        wait = t - _now()
+        return not (wait > 0 and self.stop.wait(wait))
+
     def capture(self, mid: int, detected: float) -> None:
-        timings = {}
+        timings: dict = {"plan": {"clip_a_at_s": self.call_a_s, "clip_b_at_s": self.call_b_s, "clip_b_len_s": self.dur_b}}
+        bid = self.s["broadcaster_id"]
+        folder = self.settings.dir("live", f"session_{self.s['id']}")
         try:
-            wait = detected + self.capture_delay_s - _now()
-            if wait > 0 and self.stop.wait(wait):
-                _set(self.settings, mid, "skipped", "watcher stopped before the capture")
+            if not self._at(detected + self.call_a_s):
+                _set(self.settings, mid, "skipped", "watcher stopped before the capture", timings=timings)
                 return
-            if not self.tw.stream(self.s["broadcaster_id"]):
+            if not self.tw.stream(bid):
                 _set(self.settings, mid, "skipped", "the stream ended before the capture (live-only: no clipping "
-                                                    "from the archive)")
+                                                    "from the archive)", timings=timings)
                 return
             _set(self.settings, mid, "capturing")
-            clip_id = self.tw.create_clip(self.s["broadcaster_id"], duration=60)
-            timings["clip_requested_s"] = round(_now() - detected, 1)
-            info = self.tw.wait_clip(clip_id)
-            timings["clip_ready_s"] = round(_now() - detected, 1)
-            _set(self.settings, mid, "downloading", twitch_clip_id=clip_id, captured_at=info.get("created_at"))
-            url = self.tw.download_url(self.s["broadcaster_id"], clip_id)
-            path = self.tw.fetch(url, self.settings.dir("live", f"session_{self.s['id']}") / f"moment_{mid}.mp4")
+            clip_a = self.tw.create_clip(bid, duration=60)
+            timings["clip_a_requested_s"] = round(_now() - detected, 1)
+            clip_b = None
+            if self.dur_b and self._at(detected + self.call_b_s):
+                if self.tw.stream(bid):        # live-only: the second half is only taken while still live
+                    clip_b = self.tw.create_clip(bid, duration=self.dur_b)
+                    timings["clip_b_requested_s"] = round(_now() - detected, 1)
+                else:
+                    timings["clip_b"] = "stream ended; kept the first half only"
+            info = self.tw.wait_clip(clip_a)
+            _set(self.settings, mid, "downloading", twitch_clip_id=clip_a, captured_at=info.get("created_at"))
+            path_a = self.tw.fetch(self.tw.download_url(bid, clip_a), folder / f"moment_{mid}_a.mp4")
+            path = path_a
+            if clip_b:
+                try:
+                    self.tw.wait_clip(clip_b)
+                    path_b = self.tw.fetch(self.tw.download_url(bid, clip_b), folder / f"moment_{mid}_b.mp4")
+                    timings["join"] = stitch(path_a, path_b, folder / f"moment_{mid}.mp4",
+                                             expected_overlap_s=self.overlap_s)
+                    path = folder / f"moment_{mid}.mp4"
+                except Exception as ex:          # the first half is still a usable moment
+                    timings["clip_b"] = f"not used: {ex}"[:200]
             timings["downloaded_s"] = round(_now() - detected, 1)
             _set(self.settings, mid, "editing", file_path=str(path), timings=timings)
         except Exception as ex:

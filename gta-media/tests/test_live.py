@@ -137,7 +137,9 @@ def test_spike_is_captured_downloaded_and_edited_while_monitoring_continues(sett
         edited.append((mid, path.name))
         return [4242]
 
-    r = live.LiveRunner(settings, s, tw=tw, capture_delay_s=0.2, min_combined=0.0, chat_factory=NoChat, edit=fake_edit)
+    r = live.LiveRunner(settings, s, tw=tw, call_a_s=0.2, call_b_s=0.4, min_combined=0.0, chat_factory=NoChat,
+                        edit=fake_edit)
+    assert (r.dur_b, live.LiveRunner(settings, s, tw=tw).call_a_s, live.LiveRunner(settings, s, tw=tw).call_b_s) == (25.0, 27.0, 47.0)
     assert r.poll_live() and r.s["status"] == "live"
     now = time.time()
     _burst(r, now)
@@ -151,8 +153,11 @@ def test_spike_is_captured_downloaded_and_edited_while_monitoring_continues(sett
     assert _wait(lambda: status() in ("ready", "failed", "skipped")) and status() == "ready", status()
     m = conn.execute("SELECT * FROM live_moments WHERE id = %s", (mid,)).fetchone()
     assert m["twitch_clip_id"] == "ClipABC" and m["clip_ids"] == [4242] and m["latency_s"] is not None
-    assert "audio_excitement" in m["signals"] and ("create_clip", 60) in tw.calls
+    assert "audio_excitement" in m["signals"] and ("create_clip", 60) in tw.calls and ("create_clip", 25) in tw.calls
     assert m["file_path"].endswith(f"moment_{mid}.mp4") and edited == [(mid, f"moment_{mid}.mp4")]
+    join = m["timings"]["join"]                # two clips joined into one segment, longer than either
+    from vicepulse.media import probe
+    assert join["duration_s"] > probe(footage)["duration"] and "cut_at_s" in join
 
     # the stream ends: the session closes and no new moment can start
     tw.is_live = False
@@ -165,7 +170,7 @@ def test_spike_is_captured_downloaded_and_edited_while_monitoring_continues(sett
 def test_stream_ending_before_the_capture_is_skipped_not_clipped_from_the_archive(settings, conn, footage):
     s = _session(conn)
     tw = FakeTwitch(footage)
-    r = live.LiveRunner(settings, s, tw=tw, capture_delay_s=0.5, chat_factory=NoChat, edit=lambda *a: [1])
+    r = live.LiveRunner(settings, s, tw=tw, call_a_s=0.5, call_b_s=0.6, chat_factory=NoChat, edit=lambda *a: [1])
     r.poll_live()
     now = time.time()
     _burst(r, now)
@@ -178,6 +183,32 @@ def test_stream_ending_before_the_capture_is_skipped_not_clipped_from_the_archiv
     assert m["status"] == "skipped" and "live-only" in m["status_reason"]
     assert not any(isinstance(c, tuple) and c[0] == "create_clip" for c in tw.calls)
     r.edits.shutdown(wait=True)
+
+
+def test_stream_ending_between_the_two_halves_keeps_the_first_half_only(settings, conn, footage):
+    s = _session(conn)
+
+    class EndsAfterFirst(FakeTwitch):
+        def create_clip(self, bid, duration=60, title=None):
+            cid = super().create_clip(bid, duration, title)
+            self.is_live = False               # the streamer goes offline right after the first clip
+            return cid
+
+    tw = EndsAfterFirst(footage)
+    r = live.LiveRunner(settings, s, tw=tw, call_a_s=0.1, call_b_s=0.3, min_combined=0.0, chat_factory=NoChat,
+                        edit=lambda *a: [7])
+    r.poll_live()
+    now = time.time()
+    _burst(r, now)
+    mid = r.tick(now)
+    for t in r.captures:
+        t.join(30)
+    r.edits.shutdown(wait=True)
+    conn.rollback()
+    m = conn.execute("SELECT status, file_path, timings FROM live_moments WHERE id = %s", (mid,)).fetchone()
+    assert m["status"] == "ready" and m["file_path"].endswith(f"moment_{mid}_a.mp4")
+    assert "kept the first half" in m["timings"]["clip_b"]
+    assert [c for c in tw.calls if isinstance(c, tuple)] == [("create_clip", 60)]
 
 
 def test_real_edit_pipeline_puts_the_live_clip_in_the_review_queue_and_dashboard(settings, conn, footage):
