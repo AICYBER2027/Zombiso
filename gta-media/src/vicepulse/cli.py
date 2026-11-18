@@ -479,6 +479,13 @@ def cmd_client_render(a, s, conn):
                                     size=a.size, encoder=a.encoder)
 
 
+def cmd_kick_status(a, s, conn):
+    from .sources.kick import Kick
+
+    k = Kick(os.environ.get("KICK_CLIENT_ID", ""), os.environ.get("KICK_CLIENT_SECRET", ""))
+    return {"channels": k.channels(a.slug.split(","))}
+
+
 def cmd_web_build(a, s, conn):
     from pathlib import Path
 
@@ -679,6 +686,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--captions-json")
     sp.add_argument("--size", help="override the plan's size, e.g. 720x1280")
     sp.add_argument("--encoder", default="auto")
+    sp = add("kick-status", cmd_kick_status, "live status of Kick channels via Kick's official API (KICK_CLIENT_ID/SECRET)")
+    sp.add_argument("--slug", required=True, help="comma list of channel slugs")
     sp = add("web-build", cmd_web_build, "write the public website pages (EN + PT) as static files; uploads nothing")
     sp.add_argument("--out", default="site-dist")
     sp.add_argument("--app-url", default="", help="where sign-up/dashboard will live, e.g. https://app.example.com")
@@ -710,7 +719,7 @@ def run(argv: list[str], settings: Settings | None = None) -> dict:
 
         web_serve(settings, args.host, args.port)
         return {}
-    if args.command == "web-build":
+    if args.command in ("web-build", "kick-status"):
         return args.fn(args, settings, None)
     if args.command == "style-compare" and not args.clip:
         return args.fn(args, settings, None)          # own test footage: no database needed
