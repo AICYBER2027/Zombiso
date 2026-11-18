@@ -48,6 +48,13 @@ If validation fails, the page lists each route tried with Meta's message (no tok
 `src/vicepulse/accounts.py` (`find_instagram_account`, `instagram_save_token`); tests in
 `tests/test_review_page.py`.
 
+## Added 2026-11-18 (overnight session) - see `docs/PLATFORM.md` and `docs/EDIT_STYLES.md`
+- Four edit styles incl. Streamer Pro, creator frame styles (gradient/solid/neon/minimal), automatic facecam.
+- Website (EN + PT-BR) with creator accounts and dashboard, local only (`--profile web`, 127.0.0.1:8091).
+- Creator clients: branding, preferences, permission records verified by staff, deliveries, plans, no payments.
+- Facebook Reels client, safer retries, duplicate guard, rights scopes (migration 006), Kick live status.
+- The running containers still have the OLD code. After the next rebuild run `vicepulse migrate` (005 + 006).
+
 ## After Instagram
 - TikTok connection (developer app; private posts only until TikTok approves the app).
 - Public media URL for Instagram/TikTok uploads, then analytics feedback (P4).
