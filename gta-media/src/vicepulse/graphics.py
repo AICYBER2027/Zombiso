@@ -23,6 +23,7 @@ TITLE_FONT = "Anton"                  # family names as libass sees them (captio
 CAPTION_FONT = "Archivo Black"
 _FILES = {"Anton": "Anton-Regular.ttf", "Archivo Black": "ArchivoBlack-Regular.ttf"}
 
+FRAME_STYLES = ("gradient", "solid", "neon", "minimal")
 DEFAULT_THEME = {"primary": "#FF2E88", "secondary": "#FF9A1F", "accent": "#FFD600", "dark": "#0E0B16",
                  "light": "#FFFFFF"}
 
@@ -78,8 +79,14 @@ class Assets:
         self.k = self.W / 1080
         self.brand = brand or {}
         self.t = theme(brand)
+        # Creator's facecam/game frame: style gradient | solid | neon | minimal, radius (px on 1080 canvas),
+        # thickness (2-20, 8 = default look).
+        fr = self.brand.get("frame") or {}
+        self.frame_style = fr.get("style") if fr.get("style") in FRAME_STYLES else "gradient"
+        self.frame_radius = fr.get("radius")
+        self.frame_thickness = fr.get("thickness")
         key = hashlib.sha1(json.dumps([size, self.t, self.brand.get("name"), self.brand.get("handle"),
-                                       self.brand.get("logo")], sort_keys=True).encode()).hexdigest()[:10]
+                                       self.brand.get("logo"), fr], sort_keys=True).encode()).hexdigest()[:10]
         self.dir = Path(folder) / f"gfx_{key}"
         self.dir.mkdir(parents=True, exist_ok=True)
 
@@ -98,7 +105,16 @@ class Assets:
         """Branded border around a w x h box (output pixels). Returns (png, padding): place it at (x-pad, y-pad).
 
         frames > 1: an animated border - the gradient turns once around the frame over that many images,
-        saved as name_00.png, name_01.png ... (returned as name_%02d.png, played as a looping sequence)."""
+        saved as name_00.png, name_01.png ... (returned as name_%02d.png, played as a looping sequence).
+        The brand's frame settings (style, radius, thickness) override the defaults."""
+        if self.frame_radius is not None:
+            radius = int(self.frame_radius)
+        if self.frame_thickness:
+            stroke = max(2, round(stroke * int(self.frame_thickness) / 8))
+        if self.frame_style == "minimal":
+            stroke, glow, brackets = max(2, stroke // 2), False, False
+        if self.frame_style in ("solid", "minimal"):
+            frames = 1                                 # nothing to animate in a single colour
         if frames > 1:
             for i in range(frames):
                 self._frame_one(w, h, name=f"{name}_{i:02d}", radius=radius, stroke=stroke, brackets=brackets,
@@ -120,14 +136,28 @@ class Assets:
             md.ellipse(box, outline=255, width=s)
         else:
             md.rounded_rectangle(box, radius=self.px(radius), outline=255, width=s)
-        grad = _gradient(W, H, t["primary"], t["secondary"], angle=angle)
+        style = self.frame_style
+        if style == "solid":
+            grad = Image.new("RGBA", (W, H), rgb(t["primary"]))
+        elif style == "minimal":
+            grad = Image.new("RGBA", (W, H), rgb(t["light"], 235))
+        else:
+            grad = _gradient(W, H, t["primary"], t["secondary"], angle=angle)
         if glow:
             halo = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-            halo.paste(grad, (0, 0), mask.filter(ImageFilter.MaxFilter(5)))
-            img = Image.alpha_composite(img, halo.filter(ImageFilter.GaussianBlur(self.px(14))))
+            halo.paste(grad, (0, 0), mask.filter(ImageFilter.MaxFilter(9 if style == "neon" else 5)))
+            blur = self.px(26 if style == "neon" else 14)
+            img = Image.alpha_composite(img, halo.filter(ImageFilter.GaussianBlur(blur)))
+            if style == "neon":                       # a second, wider bloom
+                img = Image.alpha_composite(img, halo.filter(ImageFilter.GaussianBlur(blur * 2)))
         ring = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         ring.paste(grad, (0, 0), mask)
         img = Image.alpha_composite(img, ring)
+        if style == "neon":                           # bright core line, like a lit tube
+            core = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            core.paste(Image.new("RGBA", (W, H), (255, 255, 255, 210)), (0, 0),
+                       mask.filter(ImageFilter.MinFilter(3)) if s >= 6 else mask.point(lambda v: v // 2))
+            img = Image.alpha_composite(img, core)
         d = ImageDraw.Draw(img)
         if brackets and not round_:
             L, bw, off = self.px(54), self.px(7), self.px(14)

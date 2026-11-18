@@ -473,6 +473,12 @@ def cmd_client_deliver(a, s, conn):
     return {"delivery": did, "client": a.client, "file": str(dest)}
 
 
+def cmd_client_render(a, s, conn):
+    cues = json.loads(open(a.captions_json, encoding="utf-8").read()) if a.captions_json else []
+    return render.render_for_client(conn, s, a.client, a.file, in_s=a.start, out_s=a.end, cues=cues, title=a.title,
+                                    size=a.size, encoder=a.encoder)
+
+
 def cmd_web_build(a, s, conn):
     from pathlib import Path
 
@@ -663,6 +669,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--title", required=True)
     sp.add_argument("--style", choices=["cinematic", "viral", "clean", "pro"])
     sp.add_argument("--clip", type=int)
+    sp = add("client-render", cmd_client_render, "edit a moment for a creator client in their style and branding "
+             "(needs their verified clip_creation permission) and deliver it to their dashboard")
+    sp.add_argument("--client", required=True, help="client slug")
+    sp.add_argument("--file", required=True)
+    sp.add_argument("--start", type=float, default=0.0)
+    sp.add_argument("--end", type=float)
+    sp.add_argument("--title", required=True)
+    sp.add_argument("--captions-json")
+    sp.add_argument("--size", help="override the plan's size, e.g. 720x1280")
+    sp.add_argument("--encoder", default="auto")
     sp = add("web-build", cmd_web_build, "write the public website pages (EN + PT) as static files; uploads nothing")
     sp.add_argument("--out", default="site-dist")
     sp.add_argument("--app-url", default="", help="where sign-up/dashboard will live, e.g. https://app.example.com")

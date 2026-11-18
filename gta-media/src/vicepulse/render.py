@@ -17,6 +17,8 @@ from pathlib import Path
 
 from PIL import Image, ImageChops
 
+from datetime import datetime, timezone
+
 from . import db, media, rights
 from .config import PLATFORMS, Settings
 from .voice import VoiceProvider, make_voice
@@ -191,6 +193,11 @@ def render_clip_platform(src_path: str, src_info: dict, *, in_s: float, out_s: f
     return out_path
 
 
+def default_facecam() -> str | None:
+    """Facecam handling for pipeline renders: 'auto' (detect it; needs OpenCV, otherwise no facecam) or 'none'."""
+    return None if os.environ.get("VICEPULSE_FACECAM", "auto") == "none" else "auto"
+
+
 def channel_brand(settings: Settings, channel_key: str) -> dict:
     """Branding for a channel's styled edits (channels.json "brand"), e.g. handle, accent colour, outro line."""
     try:
@@ -245,6 +252,67 @@ def compare_styles(src: str, *, in_s: float, out_s: float | None, cues: list[dic
             "analysis": analysis_out, "styles": results, "side_by_side": str(preview) if n > 1 else None}
 
 
+def client_rights(conn, client_id: int) -> dict:
+    """The client's verified, unrevoked rights entry that allows clip creation, or PermissionError."""
+    row = conn.execute(
+        """SELECT r.* FROM rights_ledger r WHERE r.id IN (SELECT rights_id FROM client_permissions
+               WHERE client_id = %s AND status = 'verified' AND rights_id IS NOT NULL)
+           ORDER BY r.id DESC LIMIT 1""", (client_id,)).fetchone()
+    decision = rights.check_grant(row, scope="clip_creation")
+    if not decision.ok:
+        raise PermissionError("this creator has no verified permission for clip creation: " + "; ".join(decision.reasons))
+    return row
+
+
+def render_for_client(conn, settings: Settings, client_slug: str, src: str, *, in_s: float, out_s: float | None,
+                      cues: list[dict] | None = None, title: str, size: str | None = None,
+                      encoder: str = "auto") -> dict:
+    """Edit one moment for a creator client in their own style and branding and put it in their dashboard.
+
+    Needs the client's verified clip_creation permission (checked before the footage is read). Nothing is added
+    to the VicePulse channels' sources, clips or publishing queue."""
+    from . import clients, styles
+
+    c = conn.execute("SELECT * FROM clients WHERE slug = %s", (client_slug,)).fetchone()
+    if c is None:
+        raise ValueError(f"no client {client_slug!r}")
+    if c["status"] not in ("active", "pending"):
+        raise PermissionError(f"client {client_slug} is {c['status']}")
+    client_rights(conn, c["id"])
+    opts = clients.render_options(conn, c)
+    used = clients.usage(conn, c["id"])
+    if used["clips_left"] <= 0:
+        raise PermissionError(f"the {used['plan_name']} plan's {used['clips_included']} clips for this month are used up")
+    info = media.probe(src)
+    out_s = out_s if out_s is not None else info["duration"]
+    out_size = render_size(size or opts["size"])
+    cues = cues if opts["captions"] else []
+    cues = cues or []
+    fc = opts["facecam"]
+    facecam = fc if fc in (None, "auto") else _parse_facecam(fc)
+    folder = settings.dir("clients", str(c["id"]), "deliveries")
+    out = folder / f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}_{opts['style']}.mp4"
+    res = styles.render_styled(src, info, in_s=in_s, out_s=out_s, cues=cues, style=opts["style"], platform="shared",
+                               out_path=out, size=out_size, encoder=pick_encoder(encoder), preset="veryfast",
+                               brand=opts["brand"], facecam=facecam, layout=opts["layout"])
+    qc = styles.quality_check(out, size=out_size, duration=res["plan"]["duration"])
+    if not qc.get("ok"):
+        raise RuntimeError(f"quality check failed, not delivered: {qc}")
+    did = clients.add_delivery(conn, client_id=c["id"], file_path=str(out), title=title, style=opts["style"],
+                               duration_s=res["plan"]["duration"], file_sha256=media.sha256_file(out))
+    db.log_event(conn, "render", "client_delivery", did, "rendered",
+                 {"client": client_slug, "style": opts["style"], "plan": res["plan"], "qc": qc})
+    conn.commit()
+    return {"delivery": did, "file": str(out), "style": opts["style"], "qc": qc, "facecam": res.get("facecam"),
+            "render_s": res.get("render_s")}
+
+
+def _parse_facecam(text: str) -> dict:
+    box, _, mode = text.partition(":")
+    x, y, w, h = (float(v) for v in box.split(","))
+    return {"x": x, "y": y, "w": w, "h": h, "mode": mode or "pip"}
+
+
 def render_pending(conn, settings: Settings, voice: VoiceProvider | None = None, *,
                    clip_ids: list[int] | None = None, layout: str = "auto", size: str | None = None,
                    encoder: str | None = None, reuse: bool | None = None, preset: str | None = None,
@@ -283,7 +351,8 @@ def render_pending(conn, settings: Settings, voice: VoiceProvider | None = None,
             from . import styles
 
             cues = clip["script"]["captions"]
-            analysis = styles.analyse(clip["file_path"], info, clip["in_s"], clip["out_s"], cues)
+            analysis = styles.analyse(clip["file_path"], info, clip["in_s"], clip["out_s"], cues,
+                                      facecam=default_facecam())
         for platform in PLATFORMS:
             path = settings.dir("renders", clip["channel_key"], str(clip["for_date"])) / f"clip{clip['id']}_{platform}.mp4"
             if reuse and shared is not None:
