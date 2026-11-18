@@ -238,20 +238,53 @@ class Assets:
         img = Image.new("RGBA", (D + self.px(12), D + self.px(12)), (0, 0, 0, 0))
         dr = ImageDraw.Draw(img)
         dr.ellipse((self.px(6), self.px(8), D + self.px(6), D + self.px(8)), fill=(0, 0, 0, 120))
-        disc = _gradient(D, D, t["primary"], t["secondary"], angle=45)
         m = Image.new("L", (D, D), 0)
         ImageDraw.Draw(m).ellipse((0, 0, D - 1, D - 1), fill=255)
-        img.paste(disc, (0, 0), m)
-        logo = self.brand.get("logo")
-        if logo and Path(logo).is_file():
-            inner = Image.open(logo).convert("RGBA")
-            inner.thumbnail((int(D * 0.78), int(D * 0.78)))
-            img.alpha_composite(inner, ((D - inner.width) // 2, (D - inner.height) // 2))
+        logo = self.logo_image(D)
+        if logo is not None:
+            img.paste(logo, (0, 0), m)
         else:
+            disc = _gradient(D, D, t["primary"], t["secondary"], angle=45)
+            img.paste(disc, (0, 0), m)
             letters = self.brand.get("monogram") or monogram(self.brand.get("name") or "VicePulse")
             f = font(TITLE_FONT, int(D * 0.46))
             dr.text((D / 2, D / 2), letters or "VP", font=f, fill=rgb(t["light"]), anchor="mm")
         dr.ellipse((0, 0, D - 1, D - 1), outline=rgb(t["light"], 220), width=self.px(4))
+        return self._save(img, f"{name}.png")
+
+    def logo_path(self) -> Path | None:
+        logo = self.brand.get("logo")
+        if not logo:
+            return None
+        p = Path(logo)
+        if not p.is_absolute():
+            p = PACKAGE_ROOT / p
+        return p if p.is_file() else None
+
+    def logo_image(self, d: int) -> Image.Image | None:
+        """The brand logo as a d x d square (centre crop), or None. Round logos on dark squares fit a circle."""
+        p = self.logo_path()
+        if p is None:
+            return None
+        im = Image.open(p).convert("RGBA")
+        side = min(im.size)
+        im = im.crop(((im.width - side) // 2, (im.height - side) // 2, (im.width + side) // 2, (im.height + side) // 2))
+        return im.resize((d, d), Image.LANCZOS)
+
+    def logo_reveal(self, *, d: int = 460, name: str = "logo_reveal") -> str | None:
+        """Big round logo with a soft brand glow, for the end card."""
+        D = self.px(d)
+        logo = self.logo_image(D)
+        if logo is None:
+            return None
+        pad = self.px(40)
+        img = Image.new("RGBA", (D + 2 * pad, D + 2 * pad), (0, 0, 0, 0))
+        glow = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        ImageDraw.Draw(glow).ellipse((pad, pad, pad + D, pad + D), fill=rgb(self.t["primary"], 170))
+        img = Image.alpha_composite(img, glow.filter(ImageFilter.GaussianBlur(self.px(26))))
+        m = Image.new("L", (D, D), 0)
+        ImageDraw.Draw(m).ellipse((0, 0, D - 1, D - 1), fill=255)
+        img.paste(logo, (pad, pad), m)
         return self._save(img, f"{name}.png")
 
     # -------------------------------------------------------------- backgrounds and bursts

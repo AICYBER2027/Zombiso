@@ -31,7 +31,14 @@
         "colour": "#FFD600",
         "outro_text": "Follow for more",
         "intro_text": "",
-        "credit": ""
+        "credit": "",
+        "logo": "assets/brand/vicepulse_en_logo.jpg",
+        "theme": {
+          "primary": "#FF2D95",
+          "secondary": "#8B2CF5",
+          "accent": "#FF8A3D",
+          "dark": "#0D0714"
+        }
       }
     },
     {

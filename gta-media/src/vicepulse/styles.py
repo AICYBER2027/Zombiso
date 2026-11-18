@@ -979,6 +979,13 @@ def build_graph(plan: EditPlan, info: dict, ass: Path, size: tuple[int, int], mo
         bd = png(gfx.badge(d=84))
         g.append(f"[f4]{bd}overlay=x={round(48 * k)}:y={round(150 * k)}[f5]")
         last = "[f5]"
+    if gfx and total > 6 and (reveal := gfx.logo_reveal()):
+        # End card: the brand logo pops in for the last 1.8 s, above the outro line.
+        t0 = total - 1.8
+        li = png(reveal)
+        g.append(f"{li}format=yuva420p,fade=t=in:st={_n(t0)}:d=0.25:alpha=1[lr];"
+                 f"{last}[lr]overlay=x=(W-w)/2:y={round(H * 0.47)}-h:enable='gte(t,{_n(t0)})'[fl]")
+        last = "[fl]"
     tail = []
     for f in plan.effects:
         if f.kind == "flash":
