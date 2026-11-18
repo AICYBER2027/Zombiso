@@ -130,6 +130,11 @@ def cmd_style_compare(a, s, conn):
             end = a.end if a.end is not None else render.media.probe(src)["duration"]
             cues = commentary.transcript_cues(tr.transcribe(src, start=in_s, duration=end - in_s), end - in_s)
         brand = render.channel_brand(s, a.channel) if a.channel else {}
+    brand = dict(brand or {})
+    if a.creator_name:
+        brand["creator_name"] = a.creator_name
+    if a.logo:
+        brand["logo"] = a.logo
     return render.compare_styles(src, in_s=in_s, out_s=out_s, cues=cues, styles_=a.styles.split(","),
                                  out_dir=a.out_dir or str(s.dir("work", "style-compare")), size=a.size,
                                  encoder=a.encoder, platform=a.platform, brand=brand, facecam=_facecam(a.facecam),
@@ -451,7 +456,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--end", type=float)
     sp.add_argument("--captions-json", help="caption cues [{start,end,text,kind}] for --file")
     sp.add_argument("--channel", choices=["en", "br"], help="use this channel's branding")
-    sp.add_argument("--styles", default="cinematic,viral,clean")
+    sp.add_argument("--styles", default="cinematic,viral,clean,pro")
+    sp.add_argument("--creator-name", help="name shown on the facecam frame and titles")
+    sp.add_argument("--logo", help="creator logo image (PNG) for the badge")
     sp.add_argument("--size", default="720x1280")
     sp.add_argument("--encoder", default="auto", choices=["auto", "nvenc", "libx264"])
     sp.add_argument("--platform", default="shared", choices=["shared", "youtube", "instagram", "tiktok"])

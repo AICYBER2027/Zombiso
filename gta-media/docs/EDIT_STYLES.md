@@ -1,4 +1,4 @@
-# Edit styles (Cinematic, Funny/Viral, Clean Professional)
+# Edit styles (Cinematic, Funny/Viral, Clean Professional, Streamer Pro)
 
 Status: **first working prototype, 2026-11-17.** Tested on an original synthetic test clip (no third-party
 footage). It still needs to be judged on real GTA gameplay before it becomes the default.
@@ -102,3 +102,28 @@ a smaller one at 25.5 s, fake facecam corner.
 6. Kick: the creator's own OBS second output already works with the direct-feed receiver, as it does for any
    platform. Still to do: check Kick's official public API for what it allows (live status, chat events) before
    using it. No scraping and no getting around Kick's controls.
+
+## 6. Motion graphics and Streamer Pro (added 2026-11-17)
+
+All graphics are original, drawn by `src/vicepulse/graphics.py` (Pillow) from shapes and gradients, and animated
+by FFmpeg during the render. Fonts: **Anton** (titles) and **Archivo Black** (captions), SIL Open Font License,
+in `assets/fonts/` with their licence files. No third-party artwork or game logos (no GTA VI / Rockstar marks).
+
+| Style | Graphics |
+|---|---|
+| Cinematic | Black bars slide in, round facecam window with a gradient ring, wide-spaced Anton title with a blur-in, light film grain, warm light leak on the teaser cut |
+| Funny/Viral | Camera on top with a thick animated gradient frame, corner brackets and a name tag; slanted yellow sticker captions with word pop; impact burst (centre kept clear) on the payoff |
+| Clean Professional | Whole picture with rounded corners and a thin frame on a blurred fill; lower-third name bar slides in and out; small round logo badge. **The facecam is never painted over** (fixes the smudge) |
+| Streamer Pro (new) | Moving striped brand background, slanted gradient title bar that slides in, camera in its own animated frame (gradient turns around it) with name tag, gameplay in a framed window, logo badge; on the payoff the frames flash, a MOMENT tag drops in, punch-in and impact sound |
+
+Facecam handling (no more smudge): the camera is only moved when the gameplay crop can steer around its original
+corner (Cinematic, Funny/Viral) or the gameplay can be taken from beside it (Streamer Pro). Otherwise it stays
+where it is in the picture.
+
+Branding per channel or creator (`channels.json` -> `brand`): `theme` {primary, secondary, accent, dark},
+`creator_name`, `handle`, `logo` (PNG path), `monogram`, `outro_text`. `style-compare` also takes
+`--creator-name` and `--logo`.
+
+Render cost on this laptop (8 GB, memory nearly full during the test): 1.5-3 minutes per style for a 13-19 s
+clip at 720x1280. Animated borders are pre-drawn image loops (a per-frame colour filter was 2-3x slower).
+After the RAM upgrade, expect this to drop well under a minute.

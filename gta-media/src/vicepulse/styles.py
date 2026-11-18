@@ -27,9 +27,10 @@ from pathlib import Path
 from . import media, signals
 from .render import CAPTION_MARGIN_V, FPS, OUT_H, OUT_W, _ass_time, _esc, _video_codec_args
 
-STYLES = ("cinematic", "viral", "clean")
-ALIASES = {"funny": "viral", "funny_viral": "viral", "professional": "clean", "clean_professional": "clean"}
-LABELS = {"cinematic": "Cinematic", "viral": "Funny/Viral", "clean": "Clean Professional"}
+STYLES = ("cinematic", "viral", "clean", "pro")
+ALIASES = {"funny": "viral", "funny_viral": "viral", "professional": "clean", "clean_professional": "clean",
+           "streamer": "pro", "streamer_pro": "pro"}
+LABELS = {"cinematic": "Cinematic", "viral": "Funny/Viral", "clean": "Clean Professional", "pro": "Streamer Pro"}
 
 _EBU = re.compile(r"t:\s*([0-9.]+)\s+TARGET:.*?M:\s*(-?[0-9.]+|-inf)")
 _PTS = re.compile(r"pts_time:([0-9.]+)")
@@ -41,7 +42,7 @@ def style_name(value: str | None) -> str:
     v = (value or "").strip().lower().replace("-", "_").replace("/", "_")
     v = ALIASES.get(v, v)
     if v not in STYLES:
-        raise ValueError(f"unknown edit style {value!r}: use cinematic, viral (funny) or clean")
+        raise ValueError(f"unknown edit style {value!r}: use cinematic, viral (funny), clean or pro (streamer)")
     return v
 
 
@@ -223,7 +224,7 @@ class Segment:
 
 @dataclass
 class Effect:
-    kind: str             # zoom | push | shake | flash | whoosh | hit | fade_out
+    kind: str             # zoom | push | shake | flash | whoosh | hit | fade_out | pulse | tag
     t: float              # output seconds
     dur: float
     amount: float
@@ -298,6 +299,7 @@ STYLE_RULES = {
     "cinematic": dict(teaser=1.6, context=12.0, slowmo=True, punches=False, transition="black"),
     "viral":     dict(teaser=1.2, context=8.0, slowmo=False, punches=True, transition="white"),
     "clean":     dict(teaser=0.0, context=12.0, slowmo=False, punches=False, transition="cut"),
+    "pro":       dict(teaser=1.2, context=10.0, slowmo=False, punches=False, transition="black"),
 }
 
 
@@ -311,7 +313,8 @@ def plan_edit(style: str, analysis: dict, cues: list[dict] | None = None, *, voi
     payoff = pick_payoff(events, dur)
     notes: list[str] = []
     spread = analysis["motion"]["spread"]
-    if layout == "auto":
+    if layout == "auto" or style == "clean":
+        # Clean always shows the whole picture: nothing is cut off, and the facecam stays where it was.
         layout = "blur" if (style == "clean" or spread >= 0.55) else "crop"
 
     if payoff is None:
@@ -407,6 +410,11 @@ def _finish(plan: EditPlan, style: str, events: list[Event], payoff: Event | Non
             fx.append(Effect("shake", p_out, 0.4, 1.0, f"shake on the payoff ({payoff.detail})"))
             fx.append(Effect("flash", p_out, 0.12, 0.55, f"flash on the payoff ({payoff.detail})"))
             fx.append(Effect("hit", max(0.0, p_out - 0.03), 0.4, 0.8, f"impact sound on the payoff ({payoff.detail})"))
+    if style == "pro" and p_out is not None:
+        fx.append(Effect("zoom", p_out, 0.5, 0.09, f"punch-in on the payoff ({payoff.detail})"))
+        fx.append(Effect("pulse", p_out, 0.45, 1.0, f"frames flash on the payoff ({payoff.detail})"))
+        fx.append(Effect("tag", p_out, 2.2, 1.0, f"MOMENT tag drops in on the payoff ({payoff.detail})"))
+        fx.append(Effect("hit", max(0.0, p_out - 0.03), 0.45, 0.7, f"impact sound on the payoff ({payoff.detail})"))
     if style == "clean" and p_out is not None:
         start = max(0.0, p_out - 1.5)
         fx.append(Effect("push", round(start, 3), 3.5, 0.04, f"subtle push on the key moment ({payoff.detail})"))
@@ -459,29 +467,39 @@ DEFAULT_BRAND = {"name": "VicePulse", "handle": "", "colour": "#FFD600", "intro_
 
 
 def build_styled_ass(cues: list[dict], plan: EditPlan, platform: str, brand: dict | None = None, *,
-                     top_margin: int = 300) -> str:
-    """top_margin: where titles sit (1920-high canvas); pushed down when a facecam occupies the top."""
+                     top_margin: int = 300, caption_margin: int | None = None, graphics: bool = True) -> str:
+    """Captions and titles for one style (1080x1920 canvas). top_margin: title position; caption_margin: caption
+    distance from the bottom when the layout needs it (never inside the apps' button area)."""
     brand = {**DEFAULT_BRAND, **(brand or {})}
+    from .graphics import CAPTION_FONT, TITLE_FONT, theme
+
+    th = theme(brand)
     margin = max(CAPTION_MARGIN_V.values()) if platform == "shared" else CAPTION_MARGIN_V[platform]
-    accent = _ass_colour(brand["colour"])
-    font = os.environ.get("VICEPULSE_CAPTION_FONT", "DejaVu Sans")
-    serif = os.environ.get("VICEPULSE_TITLE_FONT_SERIF", "DejaVu Serif")
+    if caption_margin:
+        margin = max(margin, caption_margin)
+    accent, primary, dark = _ass_colour(th["accent"]), _ass_colour(th["primary"]), _ass_colour(th["dark"])
+    plain = os.environ.get("VICEPULSE_CAPTION_FONT", "DejaVu Sans")
+    title_f = TITLE_FONT if graphics else plain
+    cap_f = CAPTION_FONT if graphics else plain
     fmt = ("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, "
            "Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, "
            "MarginR, MarginV, Encoding")
     S = plan.style
     if S == "cinematic":
-        styles = [f"Style: Cap,{font},66,&H00FFFFFF,&H00FFFFFF,&H00101010,&H90000000,-1,0,0,0,100,100,1,0,1,3,4,2,90,90,{margin},1",
-                  f"Style: Hook,{serif},82,&H00F0F0F0,&H00FFFFFF,&H00000000,&HA0000000,-1,0,0,0,100,100,2,0,1,3,5,8,90,90,{top_margin},1"]
+        styles = [f"Style: Cap,{cap_f},54,&H00FFFFFF,&H00FFFFFF,&H00101010,&H90000000,0,0,0,0,100,100,1,0,1,2,3,2,110,110,{margin},1",
+                  f"Style: Hook,{title_f},96,&H00F4F4F4,&H00FFFFFF,&H00000000,&HA0000000,0,0,0,0,100,100,9,0,1,2,4,8,90,90,{top_margin},1"]
     elif S == "viral":
-        styles = [f"Style: Cap,{font},92,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,8,3,2,70,70,{margin + 60},1",
-                  f"Style: Hook,{font},104,{accent},&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,9,3,8,70,70,{top_margin},1"]
+        styles = [f"Style: Cap,{cap_f},70,{dark},&H00FFFFFF,{accent},&HB4000000,0,0,0,0,100,100,0,0,3,16,7,2,80,80,{margin + 40},1",
+                  f"Style: Hook,{title_f},112,&H00FFFFFF,&H00FFFFFF,{primary},&H96000000,0,0,0,0,100,100,1,0,1,9,6,8,60,60,{top_margin},1"]
+    elif S == "pro":
+        styles = [f"Style: Cap,{cap_f},64,&H00FFFFFF,&H00FFFFFF,{dark},&H96000000,0,0,0,0,100,100,0,0,1,6,4,2,80,80,{margin},1",
+                  f"Style: Hook,{title_f},90,&H00FFFFFF,&H00FFFFFF,{dark},&H96000000,0,0,0,0,100,100,1,0,1,6,4,8,80,80,{top_margin},1"]
     else:
-        box = _ass_colour("#101418", 0x30)
-        styles = [f"Style: Cap,{font},60,&H00FFFFFF,&H00FFFFFF,{box},&H00000000,-1,0,0,0,100,100,0,0,3,14,0,2,100,100,{margin},1",
-                  f"Style: Hook,{font},70,&H00FFFFFF,&H00FFFFFF,{box},&H00000000,-1,0,0,0,100,100,0,0,3,18,0,8,100,100,{top_margin},1"]
-    styles += [f"Style: Tag,{font},40,&H50FFFFFF,&H00FFFFFF,&H80000000,&H00000000,-1,0,0,0,100,100,1,0,1,2,0,7,70,70,230,1",
-               f"Style: Outro,{font},70,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,2,5,90,90,0,1"]
+        box = _ass_colour(th["dark"], 0x30)
+        styles = [f"Style: Cap,{plain},58,&H00FFFFFF,&H00FFFFFF,{box},&H00000000,-1,0,0,0,100,100,0,0,3,14,0,2,110,110,{margin},1",
+                  f"Style: Hook,{cap_f},62,&H00FFFFFF,&H00FFFFFF,{box},&H00000000,0,0,0,0,100,100,0,0,3,18,0,8,110,110,{top_margin},1"]
+    styles += [f"Style: Tag,{plain},40,&H50FFFFFF,&H00FFFFFF,&H80000000,&H00000000,-1,0,0,0,100,100,1,0,1,2,0,7,70,70,230,1",
+               f"Style: Outro,{title_f},84,&H00FFFFFF,&H00FFFFFF,{dark},&H80000000,0,0,0,0,100,100,2,0,1,6,3,5,90,90,0,1"]
     head = (f"[Script Info]\nScriptType: v4.00+\nPlayResX: {OUT_W}\nPlayResY: {OUT_H}\nWrapStyle: 0\n"
             f"ScaledBorderAndShadow: yes\n\n[V4+ Styles]\n{fmt}\n" + "\n".join(styles) +
             "\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
@@ -493,38 +511,51 @@ def build_styled_ass(cues: list[dict], plan: EditPlan, platform: str, brand: dic
 
     reaction_words = {w for c in cues if c.get("kind") == "speech" for w in c["text"].lower().split()
                       if any(p.search(w) for p in signals._PHRASES)}
+
+    def word_pop(c, st, colour, prefix=""):
+        # Word-by-word highlight. The cue's words are spread evenly over the cue (the cue itself is in sync).
+        words = _clean_text(c["text"]).upper().split()
+        step = (c["end"] - c["start"]) / max(1, len(words))
+        for i in range(len(words)):
+            parts = []
+            for j, w in enumerate(words):
+                if j == i:
+                    col = "&H004040FF&" if w.lower().strip(".,!?") in reaction_words else colour + "&"
+                    parts.append(r"{\c" + col + r"\fscx110\fscy110}" + w + r"{\r}")
+                else:
+                    parts.append(w)
+            pop = r"{\fscx80\fscy80\t(0,90,\fscx100\fscy100)}" if i == 0 else ""
+            add(c["start"] + i * step, c["start"] + (i + 1) * step, st, prefix + pop + " ".join(parts))
+
     for c in cues:
         text = _clean_text(c["text"])
         is_hook = c.get("kind") in ("hook", "hook_top")
         st = "Hook" if is_hook else "Cap"
+        if S == "pro" and is_hook and graphics:
+            continue                                   # the animated title bar carries the hook
         if S == "cinematic":
-            add(c["start"], c["end"], st, r"{\fad(220,200)}" + text)
+            if is_hook:
+                add(c["start"], c["end"], st, r"{\fad(350,250)\blur8\t(0,350,\blur0)}" + text.upper())
+            else:
+                add(c["start"], c["end"], st, r"{\fad(220,200)}" + text)
         elif S == "clean":
-            add(c["start"], c["end"], st, r"{\fad(120,120)}" + text)
-        elif is_hook:
-            add(c["start"], c["end"], st, r"{\fscx130\fscy130\t(0,160,\fscx100\fscy100)}" + text.upper())
+            add(c["start"], c["end"], st, r"{\fad(140,140)}" + text)
+        elif S == "viral":
+            if is_hook:
+                add(c["start"], c["end"], st, r"{\fax-0.12\fscx135\fscy135\t(0,160,\fscx100\fscy100)}" + text.upper())
+            else:
+                word_pop(c, st, primary, prefix=r"{\fax-0.1}")
         else:
-            # Word-by-word highlight. The cue's words are spread evenly over the cue (the cue itself is in sync).
-            words = text.upper().split()
-            step = (c["end"] - c["start"]) / max(1, len(words))
-            for i in range(len(words)):
-                parts = []
-                for j, w in enumerate(words):
-                    if j == i:
-                        col = "&H004040FF&" if w.lower().strip(".,!?") in reaction_words else accent + "&"
-                        parts.append(r"{\c" + col + r"\fscx112\fscy112}" + w + r"{\r}")
-                    else:
-                        parts.append(w)
-                pop = r"{\fscx85\fscy85\t(0,90,\fscx100\fscy100)}" if i == 0 else ""
-                add(c["start"] + i * step, c["start"] + (i + 1) * step, st, pop + " ".join(parts))
+            word_pop(c, st, accent)
     total = plan.duration
     tag = brand.get("credit") or brand.get("handle")
-    if tag and S == "clean":
+    if tag and S == "clean" and not graphics:
         add(0.0, total, "Tag", _clean_text(tag), layer=1)
     if brand.get("intro_text") and not any(c.get("kind") in ("hook", "hook_top") for c in cues):
         add(0.0, min(1.4, total), "Hook", r"{\fad(150,200)}" + _clean_text(brand["intro_text"]), layer=1)
     if brand.get("outro_text") and total > 6:
-        add(total - 1.8, total, "Outro", r"{\fad(250,0)}" + _clean_text(brand["outro_text"]), layer=2)
+        add(total - 1.8, total, "Outro", r"{\fad(250,0)\fscx85\fscy85\t(0,250,\fscx100\fscy100)}"
+            + _clean_text(brand["outro_text"]).upper(), layer=2)
     return head + "\n".join(lines) + "\n"
 
 
@@ -613,25 +644,145 @@ GRADES = {
     "cinematic": "eq=contrast=1.08:saturation=1.12:gamma=0.97,lutyuv=u='val-3':v='val+4',vignette=angle=PI/5:eval=init",
     "viral": "eq=contrast=1.06:saturation=1.25",
     "clean": "eq=contrast=1.03:saturation=1.04",
+    "pro": "eq=contrast=1.05:saturation=1.15",
 }
 AUDIO_POLISH = {
     "cinematic": "equalizer=f=90:t=q:w=1:g=3,acompressor=threshold=0.125:ratio=2.5:attack=15:release=250",
     "viral": "acompressor=threshold=0.1:ratio=4:attack=5:release=120",
     "clean": "highpass=f=60,acompressor=threshold=0.18:ratio=2:attack=20:release=300",
+    "pro": "acompressor=threshold=0.12:ratio=3:attack=10:release=200",
 }
+
+PIP_TOP = 0.11          # facecam picture-in-picture: top right, below the apps' top bar
+PIP_WIDTH = 0.36
+SPLIT_CAM = 0.36        # Funny/Viral: share of the height for the camera on top
+
+
+@dataclass
+class Layout:
+    """Where everything goes for one style (output pixels). Worked out once, used by the graph and captions."""
+    W: int
+    H: int
+    mode: str                      # full (crop/blur over the screen) | split | pro
+    cam: dict | None = None        # facecam shown on its own (None = it stays where it is in the picture)
+    cam_box: tuple | None = None   # x, y, w, h of the separate camera
+    game_box: tuple | None = None  # x, y, w, h of the gameplay
+    game_src: tuple | None = None  # x, y, w, h of the source region used as gameplay (pro)
+    crop_range: tuple | None = None  # (min, max) x of the moving crop, keeping the facecam out of it
+    title_y: int = 300             # caption canvas (1920 high): titles
+    caption_margin: int | None = None
+    notes: list = field(default_factory=list)
+
+
+def _crop_avoiding(cam: dict, scaled_w: float, window: int) -> tuple | None:
+    """x range for a moving crop of width ``window`` that never shows the facecam, or None if impossible."""
+    left_edge, right_edge = cam["x"] * scaled_w, (cam["x"] + cam["w"]) * scaled_w
+    if scaled_w - right_edge >= window:                    # room to the right of the camera
+        return right_edge, scaled_w - window
+    if left_edge >= window:                                # room to the left
+        return 0.0, left_edge - window
+    return None
+
+
+def plan_layout(plan: EditPlan, size: tuple[int, int], sw: int, sh: int, facecam: dict | None) -> Layout:
+    W, H = size
+    k = W / OUT_W
+    st = plan.style
+    if st == "pro":
+        lay = Layout(W, H, "pro", title_y=0)
+        side = facecam and (facecam["x"] + facecam["w"] <= 0.45 or facecam["x"] >= 0.55)
+        if facecam and side:
+            # Gameplay = the part of the picture beside the camera (no painting-over), camera in its own frame.
+            gx0 = (facecam["x"] + facecam["w"]) * sw if facecam["x"] < 0.5 else 0.0
+            gx1 = sw if facecam["x"] < 0.5 else facecam["x"] * sw
+            gw = int(gx1 - gx0) // 2 * 2
+            box_w = round(1000 * k) // 2 * 2
+            box_h = min(round(860 * k), round(box_w * sh / gw)) // 2 * 2
+            src_h = min(sh, round(gw * box_h / box_w)) // 2 * 2
+            lay.game_src = (int(gx0) // 2 * 2, (sh - src_h) // 2 // 2 * 2, gw, src_h)
+            cam_px_w, cam_px_h = facecam["w"] * sw, facecam["h"] * sh
+            a = cam_px_h / max(cam_px_w, 1)
+            cw = round(min(640, 430 / max(a, 0.4)) * k) // 2 * 2
+            ch = round(cw * a) // 2 * 2
+            lay.cam, lay.cam_box = facecam, ((W - cw) // 2, round(270 * k), cw, ch)
+            gy = round(270 * k) + ch + round(44 * k)
+            lay.game_box = ((W - box_w) // 2, gy, box_w, box_h)
+            lay.notes.append("Streamer Pro: camera in its own frame, gameplay beside it (nothing painted over)")
+        else:
+            box_w = round(1000 * k) // 2 * 2
+            box_h = min(round(1100 * k), round(box_w * sh / sw)) // 2 * 2
+            lay.game_box = ((W - box_w) // 2, round(300 * k), box_w, box_h)
+            if facecam:
+                lay.notes.append("Streamer Pro: camera is not at a side, kept inside the gameplay picture")
+        gb = lay.game_box
+        lay.caption_margin = max(round((H - gb[1] - gb[3]) / k) + 40, 360)
+        return lay
+    if st == "viral" and facecam and plan.layout == "crop":
+        cam_h = round(H * SPLIT_CAM / 2) * 2
+        gh = H - cam_h
+        scaled_w = sw * gh / sh
+        rng = _crop_avoiding(facecam, scaled_w, W)
+        if rng:
+            lay = Layout(W, H, "split", cam=facecam, cam_box=(0, 0, W, cam_h), game_box=(0, cam_h, W, gh),
+                         crop_range=rng, title_y=round(OUT_H * SPLIT_CAM) + 40)
+            lay.notes.append("camera on top; the gameplay crop steers around the camera's corner")
+            return lay
+    lay = Layout(W, H, "full", game_box=(0, 0, W, H))
+    if facecam and plan.layout == "crop" and st == "cinematic":
+        rng = _crop_avoiding(facecam, sw * H / sh, W)
+        if rng:
+            d = round(W * 0.34 / 2) * 2
+            lay.cam, lay.cam_box, lay.crop_range = facecam, (W - d - round(W * 0.05), round(H * PIP_TOP), d, d), rng
+            lay.title_y = round(OUT_H * PIP_TOP + d / k + 60)
+            lay.notes.append("round camera window; the gameplay crop steers around the camera's corner")
+            return lay
+    if facecam:
+        lay.notes.append("camera kept where it is in the original picture (it cannot be moved without painting over)")
+    return lay
 
 
 def build_graph(plan: EditPlan, info: dict, ass: Path, size: tuple[int, int], motion: dict, *,
-                facecam: dict | None = None, voice: bool = False, active: dict | None = None) -> str:
-    """Input i is story segment i, already cut to that segment (see ``segment_inputs``); input n is the voice.
+                facecam: dict | None = None, voice: bool = False, active: dict | None = None,
+                gfx=None, inputs: list[str] | None = None, brand: dict | None = None,
+                layout: Layout | None = None) -> str:
+    """Input i is story segment i, already cut to that segment (see ``segment_inputs``); input n is the voice;
+    graphics images are appended to ``inputs`` as further inputs.
 
     Each segment is read from the file on its own. Splitting one input instead makes FFmpeg hold every
     frame between the teaser and the rest of the story in memory (over 1 GB at 720p60) - too much for this PC.
     """
     W, H = size
+    k = W / OUT_W
     segs = plan.segments
     n = len(segs)
+    total = plan.duration
     g: list[str] = []
+    inputs = inputs if inputs is not None else []
+    next_idx = [n + (1 if voice else 0)]
+    brand = brand or {}
+
+    png_n = [0]
+
+    def png(path: str) -> str:
+        # Decoded once and repeated from memory (looping the image input would decode it again every frame).
+        inputs.extend(["-i", path])
+        idx = next_idx[0]
+        next_idx[0] += 1
+        png_n[0] += 1
+        lbl = f"[img{png_n[0]}]"
+        g.append(f"[{idx}:v]loop=loop=-1:size=1:start=0,setpts=N/{FPS}/TB,trim=duration={_n(total + 0.5)}{lbl}")
+        return lbl
+
+    def seq(pattern: str, rate: int = 8) -> str:
+        """A looping image sequence (animated border): only `rate` small images decoded per second."""
+        inputs.extend(["-loop", "1", "-framerate", str(rate), "-t", f"{total + 0.5:.3f}", "-i", pattern])
+        idx = next_idx[0]
+        next_idx[0] += 1
+        png_n[0] += 1
+        lbl = f"[img{png_n[0]}]"
+        g.append(f"[{idx}:v]fps={FPS},format=yuva420p{lbl}")
+        return lbl
+
     has_audio = bool(info.get("has_audio"))
     fade_col = "white" if plan.transition == "white" else "black"
     for i, s in enumerate(segs):
@@ -653,60 +804,191 @@ def build_graph(plan: EditPlan, info: dict, ass: Path, size: tuple[int, int], mo
         g.append(a + f"[a{i}]")
     g.append("".join(f"[v{i}][a{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=1[cv][ca]")
 
-    # Framing on the edited timeline.
     sw, sh = (active["w"], active["h"]) if active else (info["width"], info["height"])
-    keys = output_keys(plan, [tuple(k) for k in motion["keys"]])
-    cam = facecam or None
-    mode = (cam or {}).get("mode", "pip")
-    gh = H - (round(H * 0.36 / 2) * 2 if cam and mode == "split" else 0)        # gameplay area height
-    g.append(f"[cv]fps={FPS},setsar=1" + ("[cvx];[cvx]split=2[cvr][cvc]" if cam else "[cvg]"))
-    if cam:
-        # The facecam is shown on its own, so paint over its original corner in the gameplay picture.
-        dx, dy = max(1, round(cam["x"] * sw)), max(1, round(cam["y"] * sh))
-        dw = max(4, min(round(cam["w"] * sw), sw - dx - 1))
-        dh = max(4, min(round(cam["h"] * sh), sh - dy - 1))
-        g.append(f"[cvr]delogo=x={dx}:y={dy}:w={dw}:h={dh}[cvg]")
-    if plan.layout == "crop":
+    lay = layout or plan_layout(plan, size, sw, sh, facecam)
+    cam = lay.cam
+    keys = output_keys(plan, [tuple(kk) for kk in motion["keys"]])
+    g.append(f"[cv]fps={FPS},setsar=1" + ("[cvx];[cvx]split=2[cvg][cvc]" if cam else "[cvg]"))
+
+    # ---- gameplay picture [gm] at its box size
+    gx, gy, gw, gh = lay.game_box
+    if lay.mode == "pro":
+        if lay.game_src:
+            x, y, w, h = lay.game_src
+            g.append(f"[cvg]crop={w}:{h}:{x}:{y},scale={gw}:{gh}[gm]")
+        else:
+            g.append(f"[cvg]scale={gw}:{gh}:force_original_aspect_ratio=increase,crop={gw}:{gh}[gm]")
+    elif plan.layout == "crop":
         scaled_w = sw * gh / sh
-        span = max(0.0, scaled_w - W)
-        xkeys = [(t, min(span, max(0.0, scaled_w * c - W / 2))) for t, c in keys]
-        g.append(f"[cvg]scale=-2:{gh},crop={W}:{gh}:x='{_lerp_expr(xkeys)}':y=0[gm]")
+        lo, hi = lay.crop_range or (0.0, max(0.0, scaled_w - gw))
+        xkeys = [(t, min(hi, max(lo, scaled_w * c - gw / 2))) for t, c in keys]
+        g.append(f"[cvg]scale=-2:{gh},crop={gw}:{gh}:x='{_lerp_expr(xkeys)}':y=0[gm]")
     else:
-        bw, bh = max(2, W // 4 // 2 * 2), max(2, gh // 4 // 2 * 2)
+        # Whole picture on a blurred fill. Clean: a little smaller, rounded corners, thin frame.
+        bw, bh = max(2, gw // 4 // 2 * 2), max(2, gh // 4 // 2 * 2)
+        fw = (gw - round(72 * k)) // 2 * 2 if plan.style == "clean" else gw
+        fh = round(fw * sh / sw) // 2 * 2
         g.append(f"[cvg]split=2[bgs][fgs];[bgs]scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},"
-                 f"boxblur={max(2, round(5 * H / OUT_H))}:3,scale={W}:{gh}[bg];[fgs]scale={W}:-2[fg];"
-                 f"[bg][fg]overlay=(W-w)/2:(H-h)/2[gm]")
+                 f"boxblur={max(2, round(5 * H / OUT_H))}:3,scale={gw}:{gh}[bg];[fgs]scale={fw}:{fh}[fg0]")
+        if plan.style == "clean" and gfx:
+            m = png(gfx.rounded_mask(fw, fh, radius=26))
+            g.append(f"{m}format=gray,scale={fw}:{fh}[fm];[fg0]format=yuva420p[fga];[fga][fm]alphamerge[fg]")
+        else:
+            g.append("[fg0]null[fg]")
+        g.append("[bg][fg]overlay=(W-w)/2:(H-h)/2[gm]")
+        if plan.style == "clean" and gfx:
+            fr, pad = gfx.frame(fw, fh, name="clean_frame", radius=26, stroke=5, brackets=False, glow=False)
+            fi = png(fr)
+            g.append(f"{fi}format=yuva420p[fr0];[gm][fr0]overlay={(gw - fw) // 2 - pad}:{(gh - fh) // 2 - pad}[gm_]")
+        else:
+            g.append("[gm]null[gm_]")
+    gm = "[gm_]" if plan.layout != "crop" and lay.mode != "pro" else "[gm]"
+
+    # ---- zoom / shake on the gameplay only
     z = _zoom_terms(plan)
     sx, sy = _shake_terms(plan, W)
     if z or sx != "0":
         zexpr = f"min(1.4,1+{z})" if z else "1.06"          # shake alone needs a little room to move in
-        g.append(f"[gm]scale=w='2*trunc({W}*({zexpr})/2)':h='2*trunc({gh}*({zexpr})/2)':eval=frame,"
-                 f"crop={W}:{gh}:x='clip((iw-{W})/2+{sx},0,iw-{W})':y='clip((ih-{gh})/2+{sy},0,ih-{gh})'[gz]")
+        g.append(f"{gm}scale=w='2*trunc({gw}*({zexpr})/2)':h='2*trunc({gh}*({zexpr})/2)':eval=frame,"
+                 f"crop={gw}:{gh}:x='clip((iw-{gw})/2+{sx},0,iw-{gw})':y='clip((ih-{gh})/2+{sy},0,ih-{gh})'[gz]")
     else:
-        g.append("[gm]null[gz]")
-    if cam:
-        cx, cy = round(cam["x"] * sw), round(cam["y"] * sh)
-        cw, ch = max(2, round(cam["w"] * sw) // 2 * 2), max(2, round(cam["h"] * sh) // 2 * 2)
-        if mode == "split":
-            g.append(f"[cvc]crop={cw}:{ch}:{cx}:{cy},scale={W}:{H - gh}:force_original_aspect_ratio=increase,"
-                     f"crop={W}:{H - gh}[cam];[cam][gz]vstack[comp]")
-        else:
-            pw = round(W * PIP_WIDTH / 2) * 2
-            border = max(2, round(6 * W / OUT_W))
-            g.append(f"[cvc]crop={cw}:{ch}:{cx}:{cy},scale={pw}:-2,pad=iw+{2 * border}:ih+{2 * border}:{border}:{border}:white[cam];"
-                     f"[gz][cam]overlay=x=W-w-{round(W * 0.05)}:y={round(H * PIP_TOP)}[comp]")
+        g.append(f"{gm}null[gz]")
+
+    # ---- composition
+    t = gfx.t if gfx else None
+    if lay.mode == "pro":
+        pat, period = gfx.pattern()
+        pi = png(pat)
+        g.append(f"{pi}crop={W}:{H}:x='mod(t*{max(1, round(26 * k))},{period})':y=0,format=yuv420p[bgp]")
+        g.append(f"[gz]{GRADES['pro']}[gzg]")
+        g.append(f"[bgp][gzg]overlay={gx}:{gy}[c1]")
+        last = "[c1]"
+        if cam:
+            cx, cy, cw, ch = lay.cam_box
+            px, py = round(cam["x"] * sw), round(cam["y"] * sh)
+            pw, ph = max(2, round(cam["w"] * sw) // 2 * 2), max(2, round(cam["h"] * sh) // 2 * 2)
+            m = png(gfx.rounded_mask(cw, ch, radius=26, name="cam_mask"))
+            g.append(f"[cvc]crop={pw}:{ph}:{px}:{py},scale={cw}:{ch}:force_original_aspect_ratio=increase,"
+                     f"crop={cw}:{ch},format=yuva420p[camv];{m}format=gray[cmk];[camv][cmk]alphamerge[cam]")
+            g.append(f"{last}[cam]overlay={cx}:{cy}[c2]")
+            last = "[c2]"
+            tag = brand.get("creator_name") or brand.get("handle") or "LIVE"
+            fr, pad = gfx.frame(cw, ch, name="pro_cam_frame", tag=tag.upper(), frames=16)
+            fi = seq(fr)
+            g.append(f"{last}{fi}overlay={cx - pad}:{cy - pad}[c3]")
+            last = "[c3]"
+        fr, pad = gfx.frame(gw, gh, name="pro_game_frame", stroke=6, brackets=not cam, frames=16)
+        fi = seq(fr)
+        g.append(f"{last}{fi}overlay={gx - pad}:{gy - pad}[c4]")
+        last = "[c4]"
+        for f in plan.effects:
+            if f.kind == "pulse":
+                for name, box in (("pulse_game", lay.game_box), ("pulse_cam", lay.cam_box)):
+                    if not box:
+                        continue
+                    pp, ppad = gfx.pulse(box[2], box[3], name=name)
+                    pin = png(pp)
+                    lbl = f"[pl{name}]"
+                    g.append(f"{pin}format=yuva420p,fade=t=in:st={_n(f.t)}:d=0.08:alpha=1,"
+                             f"fade=t=out:st={_n(f.t + 0.12)}:d={_n(f.dur)}:alpha=1{lbl};"
+                             f"{last}{lbl}overlay={box[0] - ppad}:{box[1] - ppad}:enable='between(t,{_n(f.t)},{_n(f.t + f.dur + 0.2)})'[c_{name}]")
+                    last = f"[c_{name}]"
+            if f.kind == "tag":
+                ti = png(gfx.sticker("MOMENT", name="moment"))
+                ty = (lay.game_box[1] + round(30 * k))
+                g.append(f"{last}{ti}overlay=x={gx + round(30 * k)}:y='if(lt(t,{_n(f.t)}),-h,"
+                         f"min({ty},-h+(t-{_n(f.t)})*{round(ty / 0.25)}))':enable='between(t,{_n(f.t)},{_n(f.t + f.dur)})'[c_tag]")
+                last = "[c_tag]"
+        title = next((c for c in plan_cues_hook(plan)), None) or brand.get("creator_name") or brand.get("name") or "VicePulse"
+        tb = png(gfx.title_bar(title, max_w=820))
+        tx, ty = round(40 * k), round(150 * k)
+        g.append(f"{last}{tb}overlay=x='if(lt(t,0.15),-w,min({tx},-w+(t-0.15)*(w+{tx})/0.35))':y={ty}[c5]")
+        bd = png(gfx.badge())
+        g.append(f"[c5]{bd}overlay=x=W-w-{round(40 * k)}:y={round(148 * k)}[comp]")
+        post = []
     else:
-        g.append("[gz]null[comp]")
-    post = ["format=yuv420p", GRADES[plan.style]]
+        last = "[gz]"
+        if lay.mode == "split":
+            cx, cy, cw, ch = lay.cam_box
+            px, py = round(cam["x"] * sw), round(cam["y"] * sh)
+            pw, ph = max(2, round(cam["w"] * sw) // 2 * 2), max(2, round(cam["h"] * sh) // 2 * 2)
+            g.append(f"[cvc]crop={pw}:{ph}:{px}:{py},scale={cw}:{ch}:force_original_aspect_ratio=increase,"
+                     f"crop={cw}:{ch}[cam];[cam][gz]vstack[c1]")
+            last = "[c1]"
+            if gfx:
+                inset = round(22 * k)
+                tag = brand.get("creator_name") or brand.get("handle") or "LIVE"
+                fr, pad = gfx.frame(cw - 2 * inset, ch - 2 * inset, name="viral_cam_frame", stroke=12, tag=tag.upper(),
+                                    frames=12)
+                fi = seq(fr, rate=12)
+                g.append(f"{last}{fi}overlay={inset - pad}:{inset - pad}[c2]")
+                last = "[c2]"
+        elif cam and lay.cam_box:                          # cinematic round window
+            cx, cy, d, _ = lay.cam_box
+            fx, fy = cam.get("face", {}).get("x"), cam.get("face", {}).get("y")
+            px, py = round(cam["x"] * sw), round(cam["y"] * sh)
+            pw, ph = max(2, round(cam["w"] * sw) // 2 * 2), max(2, round(cam["h"] * sh) // 2 * 2)
+            side = min(pw, ph) // 2 * 2
+            if fx is not None:                              # centre the circle on the face
+                fsz = cam["face"].get("size", 0) * sw
+                px = int(min(max(px, fx * sw + fsz / 2 - side / 2), px + pw - side))
+                py = int(min(max(py, fy * sh + fsz / 2 - side / 2), py + ph - side))
+            m = png(gfx.circle_mask(d))
+            g.append(f"[cvc]crop={side}:{side}:{px}:{py},scale={d}:{d},format=yuva420p[camv];{m}format=gray[cmk];"
+                     f"[camv][cmk]alphamerge[cam];[gz][cam]overlay={cx}:{cy}[c1]")
+            fr, pad = gfx.frame(d, d, name="cine_ring", stroke=7, round_=True, brackets=False)
+            fi = png(fr)
+            g.append(f"[c1]{fi}overlay={cx - pad}:{cy - pad}[c2]")
+            last = "[c2]"
+        post = [GRADES[plan.style]]
+        g.append(f"{last}null[comp]")
+
+    # ---- finishing: grade, style graphics, flash, captions
+    chain = ["format=yuv420p"] + post
+    if plan.style == "cinematic":
+        chain.append("noise=c0s=6:c0f=t")                   # light film grain
+    g.append("[comp]" + ",".join(chain) + "[f0]")
+    last = "[f0]"
+    if gfx and plan.style == "cinematic":
+        bar = round(H * 0.05) // 2 * 2
+        g.append(f"color=c=black:s={W}x{bar}:r={FPS}:d={_n(total + 0.5)},split=2[bt][bb];"
+                 f"{last}[bt]overlay=x=0:y='-h+h*min(1,t/0.7)'[f1];[f1][bb]overlay=x=0:y='H-h*min(1,t/0.7)'[f2]")
+        last = "[f2]"
+        b = plan.story_offset()
+        if b > 0:
+            li = png(gfx.light_leak())
+            g.append(f"{li}format=yuva420p,fade=t=in:st={_n(max(0, b - 0.3))}:d=0.2:alpha=1,"
+                     f"fade=t=out:st={_n(b)}:d=0.5:alpha=1[lk];{last}[lk]overlay=0:0:"
+                     f"enable='between(t,{_n(max(0, b - 0.3))},{_n(b + 0.6)})'[f3]")
+            last = "[f3]"
+    if gfx and plan.style == "viral":
+        for i, f in enumerate(e for e in plan.effects if e.kind == "flash"):
+            bi = png(gfx.burst())
+            cy = (lay.game_box[1] + lay.game_box[3] // 2)
+            g.append(f"{bi}format=yuva420p,fade=t=in:st={_n(f.t)}:d=0.05:alpha=1,fade=t=out:st={_n(f.t + 0.1)}:d=0.3:alpha=1[bu{i}];"
+                     f"{last}[bu{i}]overlay=x=(W-w)/2:y={cy}-h/2:enable='between(t,{_n(f.t)},{_n(f.t + 0.45)})'[fb{i}]")
+            last = f"[fb{i}]"
+    if gfx and plan.style == "clean":
+        title = brand.get("creator_name") or brand.get("name") or "VicePulse"
+        sub = brand.get("handle") or ""
+        lt = png(gfx.lower_third(title, sub))
+        ly = round(H * 0.70)
+        g.append(f"{last}{lt}overlay=x='if(lt(t,0.4),-w,if(lt(t,0.75),-w+(t-0.4)*(w+{round(48 * k)})/0.35,"
+                 f"if(lt(t,4.4),{round(48 * k)},{round(48 * k)}-(t-4.4)*(w+{round(48 * k)})/0.35)))':y={ly}:"
+                 f"enable='lt(t,4.8)'[f4]")
+        bd = png(gfx.badge(d=84))
+        g.append(f"[f4]{bd}overlay=x={round(48 * k)}:y={round(150 * k)}[f5]")
+        last = "[f5]"
+    tail = []
     for f in plan.effects:
         if f.kind == "flash":
-            post.append(f"drawbox=x=0:y=0:w=iw:h=ih:color=white@{_n(f.amount)}:t=fill:"
+            tail.append(f"drawbox=x=0:y=0:w=iw:h=ih:color=white@{_n(f.amount)}:t=fill:"
                         f"enable='between(t,{_n(f.t)},{_n(f.t + f.dur)})'")
         if f.kind == "fade_out":
-            post.append(f"fade=t=out:st={_n(f.t)}:d={_n(f.dur)}")
-    post.append(f"ass={_esc(ass)}")
-    post.append("format=yuv420p")         # ass may hand back another pixel format
-    g.append("[comp]" + ",".join(post) + "[v]")
+            tail.append(f"fade=t=out:st={_n(f.t)}:d={_n(f.dur)}")
+    fonts = f":fontsdir={_esc(gfx_fonts())}" if gfx else ""
+    tail += [f"ass={_esc(ass)}{fonts}", "format=yuv420p"]
+    g.append(f"{last}" + ",".join(tail) + "[v]")
 
     # Audio: style polish, generated sound effects, optional voice-over (ducking the game), loudness to -14 LUFS.
     g.append(f"[ca]{AUDIO_POLISH[plan.style]}[cap]")
@@ -718,27 +1000,33 @@ def build_graph(plan: EditPlan, info: dict, ass: Path, size: tuple[int, int], mo
     else:
         g.append("[cap]anull[gmix]")
     fade = next((f for f in plan.effects if f.kind == "fade_out"), None)
-    tail = f",afade=t=out:st={_n(fade.t)}:d={_n(fade.dur)}" if fade else ""
+    atail = f",afade=t=out:st={_n(fade.t)}:d={_n(fade.dur)}" if fade else ""
     if voice:
         g.append(f"[{n}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
                  "loudnorm=I=-14:TP=-1.5:LRA=11,asplit=2[vo][sc];[gmix]volume=0.6[gq];"
                  "[gq][sc]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=400[duck];"
-                 f"[duck][vo]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.9{tail}[a]")
+                 f"[duck][vo]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.9{atail}[a]")
     else:
-        g.append(f"[gmix]loudnorm=I=-14:TP=-1.5:LRA=11,alimiter=limit=0.9{tail}[a]")
+        g.append(f"[gmix]loudnorm=I=-14:TP=-1.5:LRA=11,alimiter=limit=0.9{atail}[a]")
     return ";".join(g)
 
 
-PIP_TOP = 0.11          # facecam picture-in-picture: top right, below the apps' top bar
-PIP_WIDTH = 0.36
+def gfx_fonts() -> str:
+    from .graphics import FONT_DIR
+
+    return str(FONT_DIR)
+
+
+def plan_cues_hook(plan: EditPlan) -> list[str]:
+    return [plan.hook] if getattr(plan, "hook", None) else []
 
 
 def title_margin(facecam: dict | None, info: dict) -> int:
-    """Title position (on the 1920-high caption canvas) that stays clear of a repositioned facecam."""
+    """Title position for the classic layouts (kept for callers outside the styles)."""
     if not facecam:
         return 300
     if facecam.get("mode") == "split":
-        return round(OUT_H * 0.36) + 40
+        return round(OUT_H * SPLIT_CAM) + 40
     cam_aspect = (facecam["h"] * info["height"]) / max(1e-6, facecam["w"] * info["width"])
     return round(OUT_H * (PIP_TOP + PIP_WIDTH * cam_aspect * 9 / 16) + 50)
 
@@ -755,29 +1043,37 @@ def render_styled(src_path: str, info: dict, *, in_s: float, out_s: float, cues:
                   platform: str, out_path: Path, size: tuple[int, int] = (OUT_W, OUT_H), encoder: str = "libx264",
                   preset: str = "medium", voice: Path | None = None, brand: dict | None = None,
                   facecam: dict | None = None, layout: str = "auto", analysis: dict | None = None,
-                  plan: EditPlan | None = None) -> dict:
+                  plan: EditPlan | None = None, graphics: bool = True) -> dict:
     """Render one clip in one style. Pass ``analysis`` to reuse it across styles and platforms."""
     t0 = time.monotonic()
     analysis = analysis or analyse(src_path, info, in_s, out_s, cues, facecam=facecam)
     plan = plan or plan_edit(style, analysis, cues, voice=voice is not None, layout=layout)
+    plan.hook = next((c["text"] for c in cues if c.get("kind") in ("hook", "hook_top")), None)
     facecam = analysis.get("facecam") if facecam in (None, "auto") else facecam
-    if facecam and facecam.get("mode", "auto") == "auto":
-        # The reaction is the show in Funny/Viral: camera on top, big. The others keep the game in front.
-        facecam = {**facecam, "mode": "split" if plan.style == "viral" else "pip"}
     active = analysis.get("active")
-    view = {**info, "width": active["w"], "height": active["h"]} if active else info
+    sw, sh = (active["w"], active["h"]) if active else (info["width"], info["height"])
+    lay = plan_layout(plan, size, sw, sh, facecam)
+    plan.notes.extend(lay.notes)
+    gfx = None
+    if graphics:
+        from .graphics import Assets
+
+        gfx = Assets(out_path.parent, size, brand)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     ass = out_path.with_suffix(".ass")
-    ass.write_text(build_styled_ass(retime_cues(cues, plan), plan, platform, brand,
-                                    top_margin=title_margin(facecam, view)), encoding="utf-8")
-    args = ["ffmpeg", "-v", "error", "-y", *segment_inputs(plan, src_path, in_s)]
+    ass.write_text(build_styled_ass(retime_cues(cues, plan), plan, platform, brand, top_margin=lay.title_y,
+                                    caption_margin=lay.caption_margin, graphics=gfx is not None), encoding="utf-8")
+    extra: list[str] = []
     graph = build_graph(plan, info, ass, size, analysis["motion"], facecam=facecam, voice=voice is not None,
-                        active=active)
+                        active=active, gfx=gfx, inputs=extra, brand=brand or {}, layout=lay)
+    args = ["ffmpeg", "-v", "error", "-y", *segment_inputs(plan, src_path, in_s)]
     if voice:
         args += ["-i", str(voice)]
+    args += extra
     script = out_path.with_suffix(".graph.txt")
     script.write_text(graph, encoding="utf-8")
-    tail = ["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart", str(out_path)]
+    tail = ["-t", f"{plan.duration:.3f}", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-ar", "48000",
+            "-movflags", "+faststart", str(out_path)]
     base = args + ["-/filter_complex", str(script), "-map", "[v]", "-map", "[a]"]
     used = encoder
     try:
@@ -787,8 +1083,8 @@ def render_styled(src_path: str, info: dict, *, in_s: float, out_s: float, cues:
             raise
         used = "libx264"
         media.run(base + _video_codec_args("libx264", preset) + tail)
-    return {"path": str(out_path), "style": plan.style, "encoder": used, "plan": plan.as_dict(), "facecam": facecam,
-            "render_s": round(time.monotonic() - t0, 2)}
+    return {"path": str(out_path), "style": plan.style, "encoder": used, "plan": plan.as_dict(),
+            "facecam": lay.cam, "layout": lay.mode, "render_s": round(time.monotonic() - t0, 2)}
 
 
 # --------------------------------------------------------------------------- quality check

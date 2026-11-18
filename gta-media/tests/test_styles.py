@@ -88,25 +88,58 @@ def test_speech_captions_stay_in_sync_through_teaser_and_slow_motion():
 def test_caption_files_differ_by_style_and_keep_brand_lines():
     plan = styles.plan_edit("clean", _analysis([BANG]))
     cues = [{"start": 3.0, "end": 4.5, "text": "watch this", "kind": "speech"}]
-    ass = styles.build_styled_ass(cues, plan, "shared", {"handle": "@creator", "outro_text": "Follow for more"})
-    assert "@creator" in ass and "Follow for more" in ass and ",3,14,0,2," in ass     # boxed captions
+    ass = styles.build_styled_ass(cues, plan, "shared", {"handle": "@creator", "outro_text": "Follow for more"},
+                                  graphics=False)
+    assert "@creator" in ass and "FOLLOW FOR MORE" in ass and ",3,14,0,2," in ass     # boxed captions
+    pro = styles.build_styled_ass([{"start": 0, "end": 2, "text": "Big hook", "kind": "hook"}] + cues,
+                                  styles.plan_edit("pro", _analysis([BANG])), "shared")
+    assert "Big hook" not in pro and "Archivo Black" in pro        # the animated title bar carries the hook
     viral = styles.build_styled_ass(cues, styles.plan_edit("viral", _analysis([BANG])), "tiktok")
     assert viral.count("WATCH") == 2                                                  # one line per word
 
 
-def test_three_styles_render_from_one_analysis(footage, tmp_path):
+def test_streamer_pro_plan_and_layouts():
+    plan = styles.plan_edit("pro", _analysis([BANG]))
+    kinds = {f.kind for f in plan.effects}
+    assert {"pulse", "tag", "zoom", "hit"} <= kinds and all(f.reason for f in plan.effects)
+    side_cam = {"x": 0.0, "y": 0.4, "w": 0.35, "h": 0.6}
+    lay = styles.plan_layout(plan, (720, 1280), 1280, 720, side_cam)
+    assert lay.mode == "pro" and lay.cam and lay.game_src[0] >= 0.35 * 1280 - 2      # gameplay beside the camera
+    centre_cam = {"x": 0.35, "y": 0.3, "w": 0.3, "h": 0.4}
+    assert styles.plan_layout(plan, (720, 1280), 1280, 720, centre_cam).cam is None   # kept in the picture
+    clean = styles.plan_edit("clean", _analysis([BANG]), layout="crop")
+    assert clean.layout == "blur"                                                     # whole picture, always
+    assert styles.plan_layout(clean, (720, 1280), 1280, 720, side_cam).cam is None
+
+
+def test_moving_crop_steers_around_the_facecam_instead_of_painting_over_it():
+    cam = {"x": 0.0, "y": 0.6, "w": 0.3, "h": 0.4}
+    lo, hi = styles._crop_avoiding(cam, 2276.0, 720)
+    assert lo >= 0.3 * 2276 - 1 and hi == 2276 - 720
+    assert styles._crop_avoiding({"x": 0.3, "y": 0, "w": 0.45, "h": 1}, 1000.0, 720) is None
+
+
+def test_badge_monogram():
+    from vicepulse.graphics import monogram
+
+    assert monogram("VicePulse EN") == "VP" and monogram("Test Streamer") == "TS"
+
+
+def test_four_styles_render_from_one_analysis(footage, tmp_path):
     info = media.probe(footage)
-    res = render.compare_styles(str(footage), in_s=0.0, out_s=24.0, cues=[], styles_=["cinematic", "viral", "clean"],
-                                out_dir=str(tmp_path / "cmp"), size="360x640", encoder="libx264")
+    res = render.compare_styles(str(footage), in_s=0.0, out_s=24.0, cues=[],
+                                styles_=["cinematic", "viral", "clean", "pro"],
+                                out_dir=str(tmp_path / "cmp"), size="360x640", encoder="libx264",
+                                brand={"name": "VicePulse EN", "handle": "@vicepulse-en"})
     assert info["fps"] == 30.0
     by = {r["style"]: r for r in res["styles"]}
-    assert set(by) == {"cinematic", "viral", "clean"}
+    assert set(by) == {"cinematic", "viral", "clean", "pro"}
     for r in by.values():
         assert r["qc"]["ok"], r["qc"]
         assert (r["qc"]["width"], r["qc"]["height"]) == (360, 640)
     assert any(s["role"] == "slowmo" for s in by["cinematic"]["plan"]["segments"])     # +30 dB bang: half speed
     assert any(f["kind"] == "zoom" for f in by["viral"]["plan"]["effects"])
-    assert media.probe(res["side_by_side"])["width"] == 3 * 360
+    assert media.probe(res["side_by_side"])["width"] == 4 * 360
 
 
 def test_live_edit_uses_the_chosen_style_and_logs_why(settings, conn, footage, monkeypatch):
