@@ -201,9 +201,25 @@ class ReviewApp:
                    'VicePulse EN and the BR channel for VicePulse BR. If one Google account owns both, Google asks '
                    'which channel to use.</p>')
         out.append(self.instagram_section(st, csrf))
+        out.append(self.facebook_section(st))
         out.append(self.tiktok_section(st, csrf))
         out.append(self.twitch_section(csrf))
         return "".join(out)
+
+    def facebook_section(self, st: dict) -> str:
+        rows = ['<h3>Facebook Reels</h3><table><tr><th>VicePulse channel</th><th>Facebook Page</th></tr>']
+        for key, f in (st.get("facebook") or {}).items():
+            if f["connected"]:
+                who = f'connected: <b>{e(f["page_name"])}</b>' + ("" if f.get("can_post") is not False else
+                                                                  " <span class=tag>no posting permission</span>")
+            else:
+                who = f'not connected (expected Page: {e(f.get("expected") or "-")})'
+            rows.append(f'<tr><td><b>{e(f["name"])}</b> <span class=tag>{e(key).upper()}</span></td><td>{who}</td></tr>')
+        rows.append("</table><p class=meta>Connect from a terminal (the token is typed into a hidden prompt): "
+                    "<code>docker compose exec vicepulse vicepulse facebook-connect --channel en</code>. Needs a "
+                    "Facebook Page per channel that the Meta system user can manage. Reels upload as drafts until "
+                    "the account is marked audited.</p>")
+        return "".join(rows)
 
     @property
     def twitch_redirect(self) -> str:

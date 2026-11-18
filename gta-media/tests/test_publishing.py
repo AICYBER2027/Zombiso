@@ -106,6 +106,17 @@ def test_facebook_page_is_found_from_a_pasted_token(tmp_path):
                                     session=FakeSession([("GET", "/me/accounts", FakeResponse(200, {"data": []}))]))
 
 
+def test_accounts_status_and_review_page_show_facebook(settings, tmp_path):
+    from vicepulse.review import ReviewApp
+
+    st = accounts.status(settings)
+    assert st["facebook"]["en"]["connected"] is False and st["facebook"]["en"]["expected"] == "VicePulse EN"
+    accounts.save(settings.data_dir, "facebook_en", {"page_id": "22", "page_name": "VicePulse EN",
+                                                     "access_token": "SECRET-PAGE-TOKEN", "can_post": True})
+    html = ReviewApp(settings).facebook_section(accounts.status(settings))
+    assert "connected: <b>VicePulse EN</b>" in html and "SECRET-PAGE-TOKEN" not in html
+
+
 def test_rights_scopes():
     base = dict(licence_type="written_licence", platforms=["youtube", "facebook"], languages=["*"],
                 starts_on=date(2026, 1, 1), expires_on=None, verified_at=datetime.now(timezone.utc),
