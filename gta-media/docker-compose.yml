@@ -136,6 +136,26 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
 
+  # Creator website (accounts, dashboard, deliveries). Opt-in: `docker compose --profile web up -d web`.
+  # Bound to this PC only (127.0.0.1). Making it public is a separate, deliberate step the owner approves.
+  web:
+    image: vicepulse-worker:local
+    profiles: ["web"]
+    restart: unless-stopped
+    command: ["vicepulse", "web", "--host", "0.0.0.0", "--port", "8091"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://vicepulse:${POSTGRES_PASSWORD}@postgres:5432/vicepulse
+      VICEPULSE_HOME: /app
+      VICEPULSE_DATA_DIR: /data
+      VICEPULSE_CHANNELS_FILE: /app/config/channels.json
+    volumes:
+      - mediadata:/data
+    ports:
+      - "127.0.0.1:8091:8091"
+    depends_on:
+      postgres: {condition: service_healthy}
+
   # Direct-feed receiver: creators' second OBS output -> short rolling buffer for live clipping.
   # RTMP is bound to this PC only (127.0.0.1). Letting creators reach it from the internet needs a deliberate
   # choice (router port or a relay) and the owner's approval; nothing here opens it.

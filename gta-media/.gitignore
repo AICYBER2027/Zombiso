@@ -10,3 +10,4 @@ __pycache__/
 *.m4a
 e2e-output/
 discovery-run.json
+site-dist/

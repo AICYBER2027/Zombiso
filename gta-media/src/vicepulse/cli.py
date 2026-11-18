@@ -406,6 +406,83 @@ def cmd_discovery_run(a, s, conn):
     return discovery.run_all(conn, cfg, yt, tw, notes)
 
 
+def _secret(env_name: str, prompt: str) -> str:
+    """Read a secret from an environment variable or a hidden prompt; never from a command-line argument."""
+    value = os.environ.get(env_name, "")
+    if not value and sys.stdin.isatty():
+        import getpass
+
+        value = getpass.getpass(prompt)
+    if not value:
+        raise ValueError(f"set {env_name} or run interactively to type it (it is never shown or logged)")
+    return value.strip()
+
+
+def cmd_publish_queue(a, s, conn):
+    return publish.queue_report(conn)
+
+
+def cmd_publish_requeue(a, s, conn):
+    return publish.requeue(conn, a.job, reason=a.reason)
+
+
+def cmd_facebook_connect(a, s, conn):
+    from . import accounts
+
+    token = _secret("FACEBOOK_SETUP_TOKEN", "Meta system-user token (hidden): ")
+    expected = a.page_name or s.channel(a.channel).get("facebook_page")
+    return {"channel": a.channel, **accounts.facebook_save_page(s.data_dir, a.channel, token, page_id=a.page_id or "",
+                                                                expected_name=None if a.page_id else expected)}
+
+
+def cmd_staff_create(a, s, conn):
+    from . import clients
+
+    pw = _secret("VICEPULSE_STAFF_PASSWORD", "New staff password (hidden): ")
+    return {"staff_user": clients.create_staff(conn, email=a.email, password=pw), "email": a.email.lower()}
+
+
+def cmd_clients(a, s, conn):
+    rows = conn.execute("""SELECT c.id, c.slug, c.display_name, c.language, c.status, c.plan_key, c.created_at,
+                                  (SELECT count(*) FROM client_deliveries d WHERE d.client_id = c.id) AS deliveries,
+                                  (SELECT count(*) FROM client_permissions p WHERE p.client_id = c.id
+                                     AND p.status = 'requested') AS open_permission_requests
+                           FROM clients c WHERE c.slug <> 'vicepulse-staff' ORDER BY c.id""").fetchall()
+    return {"clients": rows}
+
+
+def cmd_client_deliver(a, s, conn):
+    """Attach a finished clip file to a client's dashboard (copied into the data volume)."""
+    import shutil
+    from pathlib import Path
+
+    from . import clients, media
+
+    c = conn.execute("SELECT * FROM clients WHERE slug = %s", (a.client,)).fetchone()
+    if c is None:
+        raise ValueError(f"no client {a.client!r}")
+    src = Path(a.file)
+    if not src.is_file():
+        raise FileNotFoundError(src)
+    dest_dir = s.dir("clients", str(c["id"]), "deliveries")
+    dest = dest_dir / f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}_{src.stem[:40]}.mp4"
+    shutil.copyfile(src, dest)
+    info = media.probe(dest)
+    did = clients.add_delivery(conn, client_id=c["id"], file_path=str(dest), title=a.title, style=a.style,
+                               clip_id=a.clip, duration_s=info.get("duration"), file_sha256=media.sha256_file(dest))
+    return {"delivery": did, "client": a.client, "file": str(dest)}
+
+
+def cmd_web_build(a, s, conn):
+    from pathlib import Path
+
+    from .web.site import build_static
+
+    files = build_static(s, Path(a.out), app_url=a.app_url)
+    return {"out": a.out, "files": len(files), "uploaded": False,
+            "note": "static files only; nothing was published. Deploy only after the owner approves."}
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="vicepulse", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
@@ -567,6 +644,31 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--expires-on")
     sp.add_argument("--credit-text")
     add("discovery-run", cmd_discovery_run, "discover + monitor + permissions + rank (scheduled job)")
+    add("publish-queue", cmd_publish_queue, "publishing queue: counts per platform and the latest errors")
+    sp = add("publish-requeue", cmd_publish_requeue, "put a failed/blocked job back in the queue after checking it by hand")
+    sp.add_argument("--job", type=int, required=True)
+    sp.add_argument("--reason", required=True)
+    sp = add("facebook-connect", cmd_facebook_connect,
+             "find a channel's Facebook Page for a Meta token (FACEBOOK_SETUP_TOKEN or hidden prompt) and save its Page token")
+    sp.add_argument("--channel", required=True)
+    sp.add_argument("--page-id", help="pick the Page by id instead of by name")
+    sp.add_argument("--page-name", help="Page name (default: facebook_page in channels.json)")
+    sp = add("staff-create", cmd_staff_create, "create a VicePulse staff login for the website (password from "
+             "VICEPULSE_STAFF_PASSWORD or a hidden prompt)")
+    sp.add_argument("--email", required=True)
+    add("clients", cmd_clients, "list creator clients")
+    sp = add("client-deliver", cmd_client_deliver, "put a finished clip in a client's dashboard")
+    sp.add_argument("--client", required=True, help="client slug")
+    sp.add_argument("--file", required=True)
+    sp.add_argument("--title", required=True)
+    sp.add_argument("--style", choices=["cinematic", "viral", "clean", "pro"])
+    sp.add_argument("--clip", type=int)
+    sp = add("web-build", cmd_web_build, "write the public website pages (EN + PT) as static files; uploads nothing")
+    sp.add_argument("--out", default="site-dist")
+    sp.add_argument("--app-url", default="", help="where sign-up/dashboard will live, e.g. https://app.example.com")
+    sp = add("web", None, "run the website (creator accounts and dashboard) on this PC")
+    sp.add_argument("--host", default="127.0.0.1")
+    sp.add_argument("--port", type=int, default=8091)
     sp = add("serve", None, "run the worker HTTP API that n8n calls")
     sp = add("review", None, "run the local review page (approve/reject clips, authorize creators)")
     sp.add_argument("--host", default="0.0.0.0")
@@ -587,6 +689,13 @@ def run(argv: list[str], settings: Settings | None = None) -> dict:
 
         review.serve(settings, args.host, args.port)
         return {}
+    if args.command == "web":
+        from .web.site import serve as web_serve
+
+        web_serve(settings, args.host, args.port)
+        return {}
+    if args.command == "web-build":
+        return args.fn(args, settings, None)
     if args.command == "style-compare" and not args.clip:
         return args.fn(args, settings, None)          # own test footage: no database needed
     conn = db.connect(settings)
