@@ -10,6 +10,7 @@ COPY pyproject.toml ./
 COPY src ./src
 COPY db ./db
 COPY config ./config
+COPY assets ./assets
 # Optional local speech-to-text for subtitles (free, CPU). Build with VICEPULSE_BUILD_WHISPER=1.
 ARG WHISPER=0
 RUN if [ "$WHISPER" = "1" ]; then pip install --no-cache-dir ".[whisper]"; else pip install --no-cache-dir .; fi
