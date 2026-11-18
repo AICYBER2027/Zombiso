@@ -2,6 +2,11 @@
 
 Publishing is a dry run unless VICEPULSE_ALLOW_LIVE_PUBLISH=1 *and* the platform account row
 is enabled. The UNIQUE (clip_id, platform) key on publish_jobs makes retries safe.
+
+Retries: only errors the platform marks as temporary (rate limit, quota, server error, a connection that never
+opened) are tried again, later each time (15 min, 30 min, ...; quota: 6 h). Anything where the post may already
+have gone out (a dropped connection mid-upload, an unknown error) is never retried automatically.
+Duplicates: the same file is never posted twice to the same account, even from a different clip row.
 """
 
 from __future__ import annotations
@@ -12,13 +17,25 @@ from typing import Callable
 from zoneinfo import ZoneInfo
 
 import psycopg
+import requests
 
 from . import db, rights
-from .config import Settings
+from .config import PUBLISH_PLATFORMS, RENDER_FOR, Settings
 from .platforms import PlatformError, Publisher, PublishRequest, make_publisher
 from .policy import TIKTOK_REQUIRED_OPTIONS
 
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = 4
+RETRY_BASE_S = 15 * 60
+QUOTA_WAIT_S = 6 * 3600
+
+
+def retry_delay(attempt: int, err: PlatformError) -> float:
+    """Seconds to wait before the next try (attempt = tries made so far, 1-based)."""
+    if err.retry_after:
+        return max(60.0, float(err.retry_after))
+    if err.kind == "quota":
+        return QUOTA_WAIT_S
+    return RETRY_BASE_S * (2 ** max(0, attempt - 1))
 PublisherFactory = Callable[..., Publisher]
 
 
@@ -44,19 +61,24 @@ def schedule_approved(conn, settings: Settings) -> dict:
             out["skipped"].append({"clip_id": clip["id"], "reason": "no free slot that day"})
             continue
         when = slots[used]
-        renders = conn.execute("SELECT * FROM renders WHERE clip_id = %s", (clip["id"],)).fetchall()
-        for r in renders:
-            acct = conn.execute("SELECT * FROM platform_accounts WHERE channel_id = %s AND platform = %s",
-                                (clip["channel_id"], r["platform"])).fetchone()
-            if acct is None:
+        renders = {r["platform"]: r for r in conn.execute("SELECT * FROM renders WHERE clip_id = %s",
+                                                          (clip["id"],)).fetchall()}
+        accounts = conn.execute("SELECT * FROM platform_accounts WHERE channel_id = %s ORDER BY id",
+                                (clip["channel_id"],)).fetchall()
+        for acct in accounts:
+            if acct["platform"] not in PUBLISH_PLATFORMS:
+                continue
+            # Facebook Reels reuse the Instagram render.
+            r = renders.get(acct["platform"]) or renders.get(RENDER_FOR.get(acct["platform"], ""))
+            if r is None:
                 continue
             options = {}
-            if r["platform"] == "tiktok":
+            if acct["platform"] == "tiktok":
                 options = (clip["check_result"] or {}).get("tiktok_options") or {}
             conn.execute(
                 """INSERT INTO publish_jobs (clip_id, platform, account_id, render_id, scheduled_for, post_options)
                    VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (clip_id, platform) DO NOTHING""",
-                (clip["id"], r["platform"], acct["id"], r["id"], when, db.Jsonb(options)))
+                (clip["id"], acct["platform"], acct["id"], r["id"], when, db.Jsonb(options)))
             out["scheduled_jobs"] += 1
         conn.execute("UPDATE clips SET status = 'scheduled' WHERE id = %s", (clip["id"],))
         db.log_event(conn, "schedule", "clip", clip["id"], "scheduled", {"at": when.isoformat()})
@@ -77,7 +99,9 @@ def _request_for(settings: Settings, job: dict) -> PublishRequest:
             public_url = None
     return PublishRequest(file_path=path, title=copy["title"], description=copy["description"],
                           hashtags=copy["hashtags"], language=job["language"], public_url=public_url,
-                          synthetic_media=settings.voice_mode == "synthetic", options=job["post_options"] or {})
+                          synthetic_media=settings.voice_mode == "synthetic",
+                          options={**(job["post_options"] or {}),
+                                   **({"duration_s": job["duration_s"]} if job.get("duration_s") else {})})
 
 
 def run_due(conn, settings: Settings, *, now: datetime | None = None,
@@ -87,7 +111,7 @@ def run_due(conn, settings: Settings, *, now: datetime | None = None,
     out = {"published": [], "dry_run": [], "blocked": [], "failed": [], "retry": []}
     jobs = conn.execute(
         """SELECT p.*, cl.titles, cl.language, cl.status AS clip_status, ch.key AS channel_key,
-                  r.file_path, a.enabled, a.audited
+                  r.file_path, r.file_sha256, r.duration_s, a.enabled, a.audited
            FROM publish_jobs p JOIN clips cl ON cl.id = p.clip_id JOIN channels ch ON ch.id = cl.channel_id
            JOIN renders r ON r.id = p.render_id JOIN platform_accounts a ON a.id = p.account_id
            WHERE p.status = 'scheduled' AND p.scheduled_for <= %s
@@ -95,28 +119,44 @@ def run_due(conn, settings: Settings, *, now: datetime | None = None,
     for job in jobs:
         jid = job["id"]
 
-        def finish(status: str, error: str | None = None, **cols) -> None:
-            sets = ", ".join(f"{k} = %s" for k in cols)
-            conn.execute(f"UPDATE publish_jobs SET status = %s, last_error = %s{', ' + sets if sets else ''} WHERE id = %s",
-                         (status, error, *cols.values(), jid))
-            db.log_event(conn, "publish", "publish_job", jid, status, {"error": error, "platform": job["platform"]})
+        def finish(status: str, error: str | None = None, kind: str | None = None, **cols) -> None:
+            sets = "".join(f", {k} = %s" for k in cols)
+            entry = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "status": status}
+            if error:
+                entry.update(error=error[:500], kind=kind)
+            conn.execute("UPDATE publish_jobs SET status = %s, last_error = %s, error_kind = %s, "
+                         "attempt_log = attempt_log || %s::jsonb" + sets + " WHERE id = %s",
+                         (status, error, kind, db.Jsonb([entry]), *cols.values(), jid))
+            db.log_event(conn, "publish", "publish_job", jid, status,
+                         {"error": error, "kind": kind, "platform": job["platform"]})
             conn.commit()
 
         # Gate 2: rights can lapse between render and post.
         decision = rights.prepublish_gate(conn, job["clip_id"], job["platform"], on=now.date(),
                                           monetised=settings.monetised)
         if not decision.ok:
-            finish("blocked", "rights: " + "; ".join(decision.reasons))
+            finish("blocked", "rights: " + "; ".join(decision.reasons), "permission")
             out["blocked"].append(jid)
             continue
         if job["clip_status"] not in ("scheduled", "published"):
-            finish("blocked", f"clip status is {job['clip_status']}")
+            finish("blocked", f"clip status is {job['clip_status']}", "rejected")
             out["blocked"].append(jid)
             continue
         if job["platform"] == "tiktok":
             missing = [k for k in TIKTOK_REQUIRED_OPTIONS if k not in (job["post_options"] or {})]
             if missing:
-                finish("blocked", "TikTok per-post choices missing from approval: " + ", ".join(missing))
+                finish("blocked", "TikTok per-post choices missing from approval: " + ", ".join(missing), "config")
+                out["blocked"].append(jid)
+                continue
+        # Never post the same file twice to one account (a re-cut clip row, a manual re-queue, ...).
+        if job["file_sha256"]:
+            twin = conn.execute(
+                """SELECT id, status FROM publish_jobs WHERE account_id = %s AND content_sha256 = %s
+                   AND id <> %s AND status IN ('published', 'publishing') LIMIT 1""",
+                (job["account_id"], job["file_sha256"], jid)).fetchone()
+            if twin:
+                finish("blocked", f"duplicate: this file was already posted to this account by job {twin['id']}"
+                       f" ({twin['status']})", "duplicate")
                 out["blocked"].append(jid)
                 continue
         req = _request_for(settings, job)
@@ -126,21 +166,39 @@ def run_due(conn, settings: Settings, *, now: datetime | None = None,
             out["dry_run"].append(jid)
             continue
         # Claim the job before any network call so a crash cannot lead to a double post.
-        conn.execute("UPDATE publish_jobs SET status = 'publishing', attempts = attempts + 1 WHERE id = %s", (jid,))
+        conn.execute("UPDATE publish_jobs SET status = 'publishing', attempts = attempts + 1, content_sha256 = %s "
+                     "WHERE id = %s", (job["file_sha256"], jid))
         conn.commit()
+        attempt = job["attempts"] + 1
         try:
             publisher = publisher_factory(job["platform"], job["channel_key"], audited=job["audited"])
             result = publisher.publish(req)
         except PlatformError as e:
-            if e.retryable and job["attempts"] + 1 < MAX_ATTEMPTS:
-                finish("scheduled", str(e))
+            if e.retryable and attempt < MAX_ATTEMPTS:
+                wait = retry_delay(attempt, e)
+                finish("scheduled", f"try {attempt} of {MAX_ATTEMPTS}: {e}", e.kind,
+                       scheduled_for=now + timedelta(seconds=wait))
                 out["retry"].append(jid)
             else:
-                finish("failed", str(e))
+                finish("failed", str(e), e.kind)
                 out["failed"].append(jid)
             continue
+        except requests.ConnectTimeout as e:     # never connected: nothing can have been posted
+            if attempt < MAX_ATTEMPTS:
+                finish("scheduled", f"try {attempt} of {MAX_ATTEMPTS}: could not connect ({type(e).__name__})",
+                       "network", scheduled_for=now + timedelta(seconds=RETRY_BASE_S * 2 ** (attempt - 1)))
+                out["retry"].append(jid)
+            else:
+                finish("failed", f"could not connect: {e!r}", "network")
+                out["failed"].append(jid)
+            continue
+        except requests.RequestException as e:   # dropped mid-way: the post may exist, a person must check
+            finish("failed", f"connection lost during the upload ({type(e).__name__}); check the platform "
+                   "before retrying so it is not posted twice", "network")
+            out["failed"].append(jid)
+            continue
         except Exception as e:  # unknown state: never auto-retry, a person must look
-            finish("failed", f"unexpected: {e!r}")
+            finish("failed", f"unexpected: {e!r}", "unknown")
             out["failed"].append(jid)
             continue
         finish("published", None, external_id=result.external_id, external_url=result.url,
@@ -232,6 +290,38 @@ def take_down(conn, settings: Settings, *, clip_id: int | None = None, source_id
     return out
 
 
+def requeue(conn, job_id: int, *, reason: str, when: datetime | None = None) -> dict:
+    """Put a failed or blocked job back in the queue after a person has checked it (e.g. the post is not on the
+    platform). Never re-queues a job that is published, publishing or taken down."""
+    job = conn.execute("SELECT * FROM publish_jobs WHERE id = %s FOR UPDATE", (job_id,)).fetchone()
+    if job is None:
+        raise ValueError(f"no publish job {job_id}")
+    if job["status"] not in ("failed", "blocked", "dry_run"):
+        raise ValueError(f"job {job_id} is {job['status']}; only failed, blocked or dry-run jobs can be re-queued")
+    when = when or datetime.now(timezone.utc)
+    entry = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "status": "requeued", "note": reason}
+    conn.execute("UPDATE publish_jobs SET status = 'scheduled', scheduled_for = %s, attempts = 0, last_error = NULL, "
+                 "error_kind = NULL, attempt_log = attempt_log || %s::jsonb WHERE id = %s",
+                 (when, db.Jsonb([entry]), job_id))
+    db.log_event(conn, "publish", "publish_job", job_id, "requeued", {"reason": reason})
+    conn.commit()
+    return {"job": job_id, "scheduled_for": when.isoformat()}
+
+
+def queue_report(conn) -> dict:
+    """Publishing queue at a glance: counts per platform and status, and the latest errors with their kind."""
+    counts = conn.execute("SELECT platform, status, count(*) AS n FROM publish_jobs GROUP BY 1, 2 ORDER BY 1, 2").fetchall()
+    errors = conn.execute(
+        """SELECT p.id, p.platform, ch.key AS channel, p.status, p.error_kind, p.last_error, p.attempts, p.scheduled_for
+           FROM publish_jobs p JOIN clips cl ON cl.id = p.clip_id JOIN channels ch ON ch.id = cl.channel_id
+           WHERE p.last_error IS NOT NULL AND p.status IN ('failed', 'blocked', 'scheduled')
+           ORDER BY p.id DESC LIMIT 50""").fetchall()
+    by: dict = {}
+    for r in counts:
+        by.setdefault(r["platform"], {})[r["status"]] = r["n"]
+    return {"counts": by, "errors": [{**e, "scheduled_for": e["scheduled_for"].isoformat()} for e in errors]}
+
+
 def health(conn, settings: Settings, *, today: date | None = None) -> dict:
     today = today or datetime.now(timezone.utc).date()
     alerts: list[str] = []
@@ -263,4 +353,4 @@ def health(conn, settings: Settings, *, today: date | None = None) -> dict:
             "llm_mode": settings.llm_mode, "game": settings.game}
 
 
-__all__ = ["schedule_approved", "run_due", "pull_analytics", "take_down", "health", "slot_times", "psycopg"]
+__all__ = ["schedule_approved", "run_due", "requeue", "queue_report", "retry_delay", "pull_analytics", "take_down", "health", "slot_times", "psycopg"]

@@ -27,9 +27,24 @@ def _language_covered(row_languages: list[str] | None, language: str | None) -> 
     return "*" in langs or language in langs or language.split("-")[0] in langs
 
 
+SCOPES = ("clip_creation", "vicepulse_channel_publishing", "creator_channel_publishing", "monetisation",
+          "branding", "live_feed")
+# What an entry made before scopes existed (scopes IS NULL) keeps meaning.
+LEGACY_SCOPES = ("clip_creation", "vicepulse_channel_publishing", "monetisation")
+
+
+def has_scope(row: dict, scope: str) -> bool:
+    scopes = row.get("scopes")
+    if scopes is None:
+        return scope in LEGACY_SCOPES
+    return scope in scopes
+
+
 def check_grant(row: dict | None, *, on: date | None = None, platform: str | None = None,
-                language: str | None = None, monetised: bool = False) -> RightsDecision:
-    """Pure check of one rights-ledger row. Used by both gates."""
+                language: str | None = None, monetised: bool = False,
+                scope: str | None = None) -> RightsDecision:
+    """Pure check of one rights-ledger row. Used by both gates. scope: the use being checked
+    (e.g. vicepulse_channel_publishing); entries without scopes keep their old meaning."""
     on = on or datetime.now(timezone.utc).date()
     reasons: list[str] = []
     if row is None:
@@ -58,6 +73,10 @@ def check_grant(row: dict | None, *, on: date | None = None, platform: str | Non
         reasons.append(f"licence does not cover language {language}")
     if monetised and not row.get("monetisation_allowed"):
         reasons.append("licence does not allow monetisation")
+    if scope is not None and not has_scope(row, scope):
+        reasons.append(f"licence does not include the scope {scope}")
+    if monetised and row.get("scopes") is not None and "monetisation" not in row["scopes"]:
+        reasons.append("licence scopes do not include monetisation")
     return RightsDecision(not reasons, reasons)
 
 
@@ -69,7 +88,7 @@ def ingest_gate(conn, source_id: int) -> RightsDecision:
     row = None
     if src["rights_id"] is not None:
         row = conn.execute("SELECT * FROM rights_ledger WHERE id = %s", (src["rights_id"],)).fetchone()
-    decision = check_grant(row)
+    decision = check_grant(row, scope="clip_creation")
     if row is not None and src["origin"] == "own_recording" and row["licence_type"] != "own":
         decision.ok = False
         decision.reasons.append("own recording linked to a non-own licence")
@@ -107,7 +126,8 @@ def prepublish_gate(conn, clip_id: int, platform: str, *, on: date | None = None
     if row["clip_status"] in ("blocked", "taken_down"):
         return RightsDecision(False, [f"clip is {row['clip_status']}"])
     grant = row if row.get("licence_type") else None
-    decision = check_grant(grant, on=on, platform=platform, language=row["clip_language"], monetised=monetised)
+    decision = check_grant(grant, on=on, platform=platform, language=row["clip_language"], monetised=monetised,
+                           scope="vicepulse_channel_publishing")
     if grant and (grant.get("verified_by") or "").startswith("auto:"):
         decision.ok = False
         decision.reasons.append("licence was accepted automatically; a person must confirm it "

@@ -10,7 +10,10 @@ from pathlib import Path
 # The project folder (holds db/, config/). From a source checkout it is two levels above this file;
 # in the Docker image the package is installed elsewhere, so the image sets VICEPULSE_HOME=/app.
 PACKAGE_ROOT = Path(os.environ.get("VICEPULSE_HOME") or Path(__file__).resolve().parents[2])
-PLATFORMS = ("youtube", "instagram", "tiktok")
+PLATFORMS = ("youtube", "instagram", "tiktok")          # one render each
+# Where a clip can be posted. Facebook Reels reuse the Instagram render (same 9:16 frame and safe zones).
+PUBLISH_PLATFORMS = PLATFORMS + ("facebook",)
+RENDER_FOR = {"facebook": "instagram"}
 
 
 def _env(name: str, default: str = "") -> str:

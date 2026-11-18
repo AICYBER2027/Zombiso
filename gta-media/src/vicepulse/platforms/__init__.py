@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 
 from ..config import platform_secret
-from .base import PlatformError, Publisher, PublishRequest, PublishResult
+from .base import PlatformError, classify, Publisher, PublishRequest, PublishResult
+from .facebook import FacebookPublisher
 from .instagram import InstagramPublisher
 from .tiktok import TikTokPublisher
 from .youtube import YouTubePublisher
@@ -47,8 +48,19 @@ def make_publisher(platform: str, channel_key: str, *, audited: bool = False) ->
             except ValueError as e:
                 raise PlatformError(str(e)) from None
         return TikTokPublisher(access_token=token, audited=audited)
-    raise PlatformError(f"unknown platform {platform}")
+    if platform == "facebook":
+        page_id = platform_secret("facebook", channel_key, "page_id")
+        token = platform_secret("facebook", channel_key, "access_token")
+        if not (page_id and token):
+            from .. import accounts
+            from ..config import Settings
+
+            page_id, token = accounts.facebook_credentials(Settings().data_dir, channel_key)
+        if not (page_id and token):
+            raise PlatformError("Facebook Page is not connected for this channel", kind="config")
+        return FacebookPublisher(page_id=page_id, access_token=token, audited=audited)
+    raise PlatformError(f"unknown platform {platform}", kind="config")
 
 
 __all__ = ["PlatformError", "Publisher", "PublishRequest", "PublishResult", "make_publisher",
-           "YouTubePublisher", "InstagramPublisher", "TikTokPublisher"]
+           "YouTubePublisher", "InstagramPublisher", "TikTokPublisher", "FacebookPublisher", "classify"]

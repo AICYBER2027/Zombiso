@@ -156,6 +156,12 @@ def status(settings: Settings) -> dict:
             "nickname": tt.get("nickname"), "expected": ch.get("tiktok_username"),
             "renew_days_left": (max(0, (tt["refresh_expires_at"] - int(time.time())) // 86400)
                                 if tt.get("refresh_expires_at") else None)}
+        fb = load(settings.data_dir, f"facebook_{key}")
+        fb_env = bool(os.environ.get(f"FACEBOOK_ACCESS_TOKEN_{key.upper()}"))
+        out.setdefault("facebook", {})[key] = {
+            "name": ch.get("name", key), "connected": fb_env or bool(fb.get("access_token")),
+            "page_name": fb.get("page_name") or ("set in .env" if fb_env else None), "page_id": fb.get("page_id"),
+            "expected": ch.get("facebook_page"), "can_post": fb.get("can_post")}
         env = bool(os.environ.get(f"YOUTUBE_REFRESH_TOKEN_{key.upper()}"))
         saved = load(settings.data_dir, f"youtube_{key}")
         out["youtube"][key] = {"name": ch.get("name", key), "connected": env or bool(saved.get("refresh_token")),
@@ -753,3 +759,52 @@ def verify(settings: Settings, session: requests.Session | None = None) -> dict:
         except ValueError as e:
             out["tiktok"][key] = {"connected": True, "ok": False, "error": str(e)}
     return out
+
+
+# ---------------------------------------------------------------- Facebook Pages (Reels)
+# Same Meta app as Instagram. A system-user (or user) token is pasted once; we ask Meta which Pages it can manage,
+# pick the channel's Page and keep that Page's own token. Nothing is posted here.
+FB_PAGE_TASKS_NEEDED = {"CREATE_CONTENT"}
+
+
+def facebook_save_page(data_dir: Path, channel_key: str, token: str, *, page_id: str = "",
+                       expected_name: str | None = None, session: requests.Session | None = None) -> dict:
+    """Find the channel's Facebook Page for this token and store its Page token. Returns what was saved (no token)."""
+    token = (token or "").strip()
+    if not token or any(c.isspace() for c in token):
+        raise ValueError("paste the whole token (one line, no spaces)")
+    http = session or requests.Session()
+    from .platforms.facebook import VERSION
+
+    r = http.get(f"{FB_GRAPH}/{VERSION}/me/accounts", timeout=30,
+                 params={"fields": "id,name,access_token,tasks", "limit": 100, "access_token": token})
+    if r.status_code >= 400:
+        raise ValueError(f"Meta refused the token: {_meta_error(r)}")
+    pages = (r.json() or {}).get("data") or []
+    if not pages:
+        raise ValueError("this token cannot manage any Facebook Page. Create a Page for the channel and give the "
+                         "system user access to it (Business settings > Pages), then make a new token")
+    pick = None
+    for pg in pages:
+        if page_id and str(pg.get("id")) == str(page_id):
+            pick = pg
+        elif not page_id and expected_name and (pg.get("name") or "").strip().lower() == expected_name.strip().lower():
+            pick = pg
+    if pick is None and not page_id and not expected_name and len(pages) == 1:
+        pick = pages[0]
+    if pick is None:
+        names = ", ".join(f"{p.get('name')} ({p.get('id')})" for p in pages)
+        raise ValueError(f"the channel's Page was not found among the token's Pages: {names}")
+    if not pick.get("access_token"):
+        raise ValueError("Meta did not return a Page token; the token needs pages_show_list and pages_manage_posts")
+    tasks = set(pick.get("tasks") or [])
+    info = {"page_id": str(pick["id"]), "page_name": pick.get("name"), "access_token": pick["access_token"],
+            "tasks": sorted(tasks), "can_post": FB_PAGE_TASKS_NEEDED <= tasks if tasks else None,
+            "connected_at": int(time.time())}
+    save(data_dir, f"facebook_{channel_key}", info)
+    return {k: v for k, v in info.items() if k != "access_token"}
+
+
+def facebook_credentials(data_dir: Path, channel_key: str) -> tuple[str, str]:
+    info = load(data_dir, f"facebook_{channel_key}")
+    return info.get("page_id", ""), info.get("access_token", "")

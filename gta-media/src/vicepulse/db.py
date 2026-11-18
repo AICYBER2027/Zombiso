@@ -9,7 +9,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from .config import PACKAGE_ROOT, PLATFORMS, Settings
+from .config import PACKAGE_ROOT, PUBLISH_PLATFORMS, Settings
 
 MIGRATIONS_DIR = PACKAGE_ROOT / "db" / "migrations"
 
@@ -52,7 +52,7 @@ def seed_channels(conn: psycopg.Connection, settings: Settings) -> list[dict]:
             (ch["key"], ch["name"], ch["language"], ch["clips_per_day"], ch["timezone"]),
         ).fetchone()
         for platform in ch["platforms"]:
-            assert platform in PLATFORMS
+            assert platform in PUBLISH_PLATFORMS, platform
             conn.execute(
                 """INSERT INTO platform_accounts (channel_id, platform) VALUES (%s, %s)
                    ON CONFLICT (channel_id, platform) DO NOTHING""",

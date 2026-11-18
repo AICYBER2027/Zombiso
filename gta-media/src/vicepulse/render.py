@@ -24,7 +24,7 @@ from .voice import VoiceProvider, make_voice
 OUT_W, OUT_H, FPS = 1080, 1920, 30
 
 # Bottom margin (px) that keeps captions clear of each app's own buttons and text.
-CAPTION_MARGIN_V = {"youtube": 420, "instagram": 480, "tiktok": 520}
+CAPTION_MARGIN_V = {"youtube": 420, "instagram": 480, "tiktok": 520, "facebook": 480}
 FONT = os.environ.get("VICEPULSE_CAPTION_FONT", "DejaVu Sans")
 
 

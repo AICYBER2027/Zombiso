@@ -114,7 +114,10 @@ def test_full_dry_run_en_and_br(conn, settings, footage, tmp_path):
     for c in clips:
         policy.decide(conn, c["id"], approve=True, by="owner", tiktok_options=TT)
     sched = publish.schedule_approved(conn, settings)
-    assert sched["scheduled_jobs"] == 12
+    assert sched["scheduled_jobs"] == 16                    # 2 channels x 2 clips x (YT, IG, TikTok, Facebook)
+    fb = conn.execute("""SELECT p.render_id, r.platform FROM publish_jobs p JOIN renders r ON r.id = p.render_id
+                         WHERE p.platform = 'facebook'""").fetchall()
+    assert fb and {r["platform"] for r in fb} == {"instagram"}         # Facebook reuses the Instagram render
     assert publish.schedule_approved(conn, settings)["scheduled_jobs"] == 0          # re-run adds nothing
     slots = conn.execute("""SELECT count(DISTINCT scheduled_for) AS n FROM publish_jobs p JOIN clips c ON c.id = p.clip_id
                             WHERE c.channel_id = %s""", (clips[0]["channel_id"],)).fetchone()["n"]
@@ -131,7 +134,8 @@ def test_full_dry_run_en_and_br(conn, settings, footage, tmp_path):
     calls = []
     later = datetime(2026, 11, 22, tzinfo=timezone.utc)
     out = publish.run_due(conn, settings, now=later, publisher_factory=fake_factory(calls))
-    assert len(out["dry_run"]) == 12 and not out["published"] and calls == []
+    # the test footage's rights entry lists YouTube, Instagram and TikTok, so the 4 Facebook jobs stop at gate 2
+    assert len(out["dry_run"]) == 12 and len(out["blocked"]) == 4 and not out["published"] and calls == []
     assert publish.run_due(conn, settings, now=later, publisher_factory=fake_factory(calls))["dry_run"] == []
     assert publish.pull_analytics(conn, settings, publisher_factory=fake_factory(calls))["pulled"] == 0 and calls == []
     assert not any(name in ("anthropic",) for name, _ in llm.calls)
@@ -275,10 +279,14 @@ def test_live_path_with_fake_platforms(conn, settings, footage, tmp_path):
     conn.execute("UPDATE platform_accounts SET enabled = TRUE WHERE platform = 'youtube'")
     conn.commit()
     out = publish.run_due(conn, settings, now=later, publisher_factory=fake_factory(calls))
-    assert len(out["published"]) == 2 and len(out["dry_run"]) == 3 and len(out["blocked"]) == 1
+    assert len(out["published"]) == 2 and len(out["dry_run"]) == 3 and len(out["blocked"]) == 3
     assert [c[1] for c in calls] == ["youtube", "youtube"]
-    blocked = conn.execute("SELECT platform, last_error FROM publish_jobs WHERE status = 'blocked'").fetchone()
-    assert blocked["platform"] == "tiktok" and "per-post choices" in blocked["last_error"]
+    blocked = conn.execute("SELECT platform, last_error FROM publish_jobs WHERE status = 'blocked' AND platform = 'tiktok'").fetchone()
+    assert "per-post choices" in blocked["last_error"]
+    # the licence lists YouTube, Instagram and TikTok only, so the Facebook posts are stopped by gate 2
+    fb = conn.execute("SELECT last_error, error_kind FROM publish_jobs WHERE platform = 'facebook'").fetchall()
+    assert len(fb) == 2 and all("does not cover facebook" in r["last_error"] and r["error_kind"] == "permission"
+                                for r in fb)
 
     # re-running never posts the same clip twice
     assert publish.run_due(conn, settings, now=later, publisher_factory=fake_factory(calls))["published"] == []
@@ -309,8 +317,15 @@ def test_live_path_with_fake_platforms(conn, settings, footage, tmp_path):
     conn.commit()
     flaky = lambda platform, channel_key, audited=False: Flaky(platform, calls)
     assert len(publish.run_due(conn, settings, now=later, publisher_factory=flaky)["retry"]) == 2
-    publish.run_due(conn, settings, now=later, publisher_factory=flaky)
-    assert len(publish.run_due(conn, settings, now=later, publisher_factory=flaky)["failed"]) == 2
+    # each retry waits longer; nothing is tried again before its time
+    assert publish.run_due(conn, settings, now=later + timedelta(minutes=5), publisher_factory=flaky)["retry"] == []
+    when = later
+    for _ in range(publish.MAX_ATTEMPTS - 2):
+        when += timedelta(hours=3)
+        assert len(publish.run_due(conn, settings, now=when, publisher_factory=flaky)["retry"]) == 2
+    assert len(publish.run_due(conn, settings, now=when + timedelta(hours=3), publisher_factory=flaky)["failed"]) == 2
+    log = conn.execute("SELECT attempt_log, error_kind FROM publish_jobs WHERE status = 'failed' LIMIT 1").fetchone()
+    assert [e["status"] for e in log["attempt_log"]][-publish.MAX_ATTEMPTS:] == ["scheduled"] * 3 + ["failed"]
 
     # takedown of the whole source: API removal where possible, a manual list where not, source blocked
     down = publish.take_down(conn, settings, source_id=src, reason="creator withdrew licence",
